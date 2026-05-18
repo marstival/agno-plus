@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "agno-plus"
+version = "0.1.0"
+description = "Reusable extension layer for Agno: layout-aware ingestion, temporal grounding, STT, OCR, background pipeline, and UI components"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Core (no framework deps — adapters add framework-specific deps)
+    "python-dateutil>=2.9",
+    "openpyxl>=3.1",
+    "python-magic>=0.4",
+]
+
+[project.optional-dependencies]
+agno = [
+    "agno>=1.0",
+]
+langchain = [
+    "langchain-core>=0.3",
+]
+audio = [
+    "faster-whisper>=1.0",
+    "openai>=1.0",
+]
+image = [
+    "openai>=1.0",
+    "Pillow>=10.0",
+]
+pgvector = [
+    "psycopg2-binary>=2.9",
+    "pgvector>=0.3",
+    "sqlalchemy>=2.0",
+]
+all = [
+    "agno-plus[agno,langchain,audio,image,pgvector]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agno_plus*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
