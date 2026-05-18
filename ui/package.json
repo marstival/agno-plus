@@ -1,0 +1,20 @@
+{
+  "name": "@agno-plus/ui",
+  "version": "0.1.0",
+  "description": "React UI components for agno-plus: upload, job status, knowledge browser",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": ["src"],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}
