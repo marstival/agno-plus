@@ -9,11 +9,9 @@ POST /chat              → { reply } (RAG over memory + OpenAI)
 
 Run
 ---
-    pip install fastapi uvicorn[standard] python-multipart openai
-    pip install -e "../../[dev]"          # agno-plus core
-    uvicorn examples.personal-aide-minimal.app:app --reload
-    # OR from this directory:
-    uvicorn app:app --reload
+    pip install -r requirements.txt
+    cd examples/personal-aide-minimal
+    PYTHONPATH=../.. uvicorn app:app --reload --port 8000
 
 Set OPENAI_API_KEY before starting.
 """
