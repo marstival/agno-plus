@@ -98,3 +98,52 @@ class MemoryStore(Protocol):
     def upsert(self, content: str, metadata: dict[str, Any]) -> MemoryRecord: ...
     def search(self, query: str, user_id: str, **kwargs: Any) -> list[MemoryRecord]: ...
     def delete(self, record_id: str) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Typed source references (produced by sub-agents, consumed by chat UI)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EpisodicRef:
+    """Citation from episodic memory recall."""
+    memory_id: str
+    event_at: datetime | None      # grounded event date, None if not temporal
+    excerpt: str                   # first 300 chars of the memory text
+    source_type: str = "episodic"
+
+
+@dataclass
+class KnowledgeRef:
+    """Citation from a semantic knowledge domain."""
+    domain_id: str
+    domain_name: str
+    document_name: str
+    excerpt: str                   # chunk text preview
+    score: float = 0.0
+    source_type: str = "knowledge"
+
+
+@dataclass
+class DataRef:
+    """Citation from a structured domain SQL query."""
+    domain_id: str
+    domain_name: str
+    table_name: str
+    sql_query: str
+    row_count: int = 0
+    source_type: str = "data"
+
+
+@dataclass
+class WebRef:
+    """Citation from a web search result."""
+    url: str
+    title: str
+    snippet: str
+    source_type: str = "web"
+
+
+# Union type for all source reference variants
+SourceRef = EpisodicRef | KnowledgeRef | DataRef | WebRef
