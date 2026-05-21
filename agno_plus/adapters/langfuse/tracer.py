@@ -1,20 +1,19 @@
-"""LangfuseTracer — TracingPort implementation using the Langfuse SDK.
+"""LangfuseTracer — TracingPort implementation using the Langfuse SDK v4+.
 
-Requires: pip install langfuse
+Requires: pip install langfuse>=4
 Env vars consumed by Langfuse SDK automatically:
   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST (optional)
 
 Traces are structured as:
-  Trace (= one chat turn)
-    └─ Span per sub-agent invocation (tool_call)
-         └─ Event per retrieval
-    └─ Generation for the final answer
+  Root span (= one chat turn, anchored to a Langfuse trace)
+    └─ Tool span per sub-agent invocation
+    └─ Retriever span per retrieval
+    └─ Generation span for the final answer
 """
 
 from __future__ import annotations
 
 import dataclasses
-import json
 from typing import Any
 
 from agno_plus.core.models import SourceRef
@@ -25,7 +24,7 @@ def _source_ref_to_dict(ref: SourceRef) -> dict[str, Any]:
 
 
 class LangfuseTracer:
-    """Wraps the Langfuse SDK to implement TracingPort."""
+    """Wraps the Langfuse SDK v4 to implement TracingPort."""
 
     def __init__(
         self,
@@ -44,19 +43,24 @@ class LangfuseTracer:
             kwargs["host"] = host
 
         self._client = Langfuse(**kwargs)
-        self._traces: dict[str, Any] = {}   # run_id → trace
-        self._spans: dict[str, Any] = {}    # run_id → {step: span}
+        self._root_spans: dict[str, Any] = {}  # run_id → root LangfuseSpan
+        self._spans: dict[str, Any] = {}       # run_id → {step: span}
 
     # --- TracingPort interface ---
 
     def start_run(self, run_id: str, user_id: str, input_text: str) -> None:
-        trace = self._client.trace(
-            id=run_id,
+        from langfuse import Langfuse
+        from langfuse.types import TraceContext
+
+        trace_id = Langfuse.create_trace_id()
+        root = self._client.start_observation(
+            trace_context=TraceContext(trace_id=trace_id),
             name="chat_turn",
+            as_type="span",
             input=input_text,
-            user_id=user_id,
         )
-        self._traces[run_id] = trace
+        root.set_trace_io(input=input_text)
+        self._root_spans[run_id] = root
         self._spans[run_id] = {}
 
     def log_tool_call(
@@ -68,11 +72,12 @@ class LangfuseTracer:
         tool_result: str | None = None,
         error: str | None = None,
     ) -> None:
-        trace = self._traces.get(run_id)
-        if trace is None:
+        root = self._root_spans.get(run_id)
+        if root is None:
             return
-        span = trace.span(
+        span = root.start_observation(
             name=tool_name,
+            as_type="tool",
             input=tool_args,
             output=tool_result,
             level="ERROR" if error else "DEFAULT",
@@ -81,32 +86,32 @@ class LangfuseTracer:
         self._spans[run_id][step] = span
 
     def log_retrieval(self, run_id: str, source_ref: SourceRef, score: float = 0.0) -> None:
-        trace = self._traces.get(run_id)
-        if trace is None:
+        root = self._root_spans.get(run_id)
+        if root is None:
             return
-        trace.event(
+        root.start_observation(
             name="retrieval",
+            as_type="retriever",
             input={"score": score},
             output=_source_ref_to_dict(source_ref),
         )
 
     def log_answer(self, run_id: str, answer_text: str, sources: list[SourceRef]) -> None:
-        trace = self._traces.get(run_id)
-        if trace is None:
+        root = self._root_spans.get(run_id)
+        if root is None:
             return
-        trace.generation(
+        root.start_observation(
             name="final_answer",
+            as_type="generation",
             output=answer_text,
             metadata={"sources": [_source_ref_to_dict(s) for s in sources]},
         )
 
     def complete_run(self, run_id: str, intents: list[str], status: str = "completed") -> None:
-        trace = self._traces.get(run_id)
-        if trace is None:
+        root = self._root_spans.get(run_id)
+        if root is None:
             return
-        trace.update(
-            metadata={"intents": intents, "status": status},
-        )
+        root.update(metadata={"intents": intents, "status": status})
         self._client.flush()
-        self._traces.pop(run_id, None)
+        self._root_spans.pop(run_id, None)
         self._spans.pop(run_id, None)
