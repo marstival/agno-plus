@@ -91,14 +91,16 @@ class SpreadsheetReader:
         tables: dict[int, dict] = {}
         for block in result.blocks:
             if block.block_type == BlockType.TABLE:
-                tables[result.blocks.index(block)] = {
-                    "headers": list(block.headers),
-                    "rows": [],
-                }
+                tables[result.blocks.index(block)] = {"headers": [], "rows": []}
 
         for row in result.table_rows:
             if row.block_index in tables:
                 tables[row.block_index]["rows"].append(dict(row.fields))
+
+        # Derive headers from actual field keys (block.headers stores generic col_N names)
+        for table in tables.values():
+            if table["rows"]:
+                table["headers"] = list(table["rows"][0].keys())
 
         return list(tables.values())
 
