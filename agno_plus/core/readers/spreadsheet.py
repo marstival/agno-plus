@@ -76,6 +76,32 @@ class SpreadsheetReader:
     def is_supported(self, filename: str) -> bool:
         return Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS
 
+    def extract_tables(
+        self, source: bytes | str, filename: str = "upload.xlsx"
+    ) -> list[dict]:
+        """Return raw table data for structured domain ingestion.
+
+        Each entry: {"headers": [...], "rows": [{col: val, ...}, ...]}.
+        Only TABLE blocks are returned (KV_PAIR and NOTE blocks are skipped).
+        """
+        if isinstance(source, str):
+            source = source.encode()
+        result = self._parse(source, filename)
+
+        tables: dict[int, dict] = {}
+        for block in result.blocks:
+            if block.block_type == BlockType.TABLE:
+                tables[result.blocks.index(block)] = {
+                    "headers": list(block.headers),
+                    "rows": [],
+                }
+
+        for row in result.table_rows:
+            if row.block_index in tables:
+                tables[row.block_index]["rows"].append(dict(row.fields))
+
+        return list(tables.values())
+
     # ------------------------------------------------------------------
     # Internal: orchestrate A → B → C → Document
     # ------------------------------------------------------------------
