@@ -65,11 +65,22 @@ def _ground_memory(memory: Any, grounder: TemporalGrounder) -> Any:
 
 
 class TemporalGrounderDb:
-    """Transparent proxy around any Agno BaseDb that grounds memories on write."""
+    """Transparent proxy around any Agno BaseDb that grounds memories on write.
+
+    Registered as a virtual subclass of agno.db.base.BaseDb so that Agno's
+    isinstance(db, BaseDb) guards treat it as a sync db (not async).
+    """
 
     def __init__(self, db: Any, grounder: TemporalGrounder | None = None) -> None:
         self._db = db
         self._grounder = grounder or TemporalGrounder()
+
+
+try:
+    from agno.db.base import BaseDb as _BaseDb
+    _BaseDb.register(TemporalGrounderDb)
+except Exception:
+    pass
 
     # Transparent delegation for all non-overridden attributes
     def __getattr__(self, name: str) -> Any:
