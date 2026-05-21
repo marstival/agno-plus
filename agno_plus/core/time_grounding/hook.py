@@ -2,7 +2,7 @@
 grounding before every memory upsert.
 
 Usage (in agent setup):
-    from agno.db.postgres import PostgresDb
+    from agno.db.postgres.postgres import PostgresDb
     from agno_plus.core.time_grounding.hook import TemporalGrounderDb
     from agno_plus.core.time_grounding.grounder import TemporalGrounder
 
@@ -43,7 +43,6 @@ def _ground_memory(memory: Any, grounder: TemporalGrounder) -> Any:
         reference_date=reference_date,
     )
 
-    # Write normalised text back
     try:
         memory.memory = grounded_text
     except AttributeError:
@@ -53,7 +52,6 @@ def _ground_memory(memory: Any, grounder: TemporalGrounder) -> Any:
         event_date = groundings[0].resolved_date
         topic_tag = f"event_at:{event_date.strftime('%Y-%m-%d')}"
         existing: list[str] = list(getattr(memory, "topics", None) or [])
-        # Remove any stale event_at tag before adding the new one
         existing = [t for t in existing if not t.startswith("event_at:")]
         existing.append(topic_tag)
         try:
@@ -75,18 +73,8 @@ class TemporalGrounderDb:
         self._db = db
         self._grounder = grounder or TemporalGrounder()
 
-
-try:
-    from agno.db.base import BaseDb as _BaseDb
-    _BaseDb.register(TemporalGrounderDb)
-except Exception:
-    pass
-
-    # Transparent delegation for all non-overridden attributes
     def __getattr__(self, name: str) -> Any:
         return getattr(self._db, name)
-
-    # --- Intercepted write methods ---
 
     def upsert_user_memory(self, memory: Any, deserialize: Any = True) -> Any:
         _ground_memory(memory, self._grounder)
@@ -96,3 +84,10 @@ except Exception:
         for m in memories:
             _ground_memory(m, self._grounder)
         return self._db.upsert_memories(memories, **kwargs)
+
+
+try:
+    from agno.db.base import BaseDb as _BaseDb
+    _BaseDb.register(TemporalGrounderDb)
+except Exception:
+    pass
