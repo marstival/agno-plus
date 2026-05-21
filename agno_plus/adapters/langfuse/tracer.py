@@ -49,16 +49,15 @@ class LangfuseTracer:
 
     # --- TracingPort interface ---
 
-    def start_run(self, user_id: str, input_text: str) -> str:
+    def start_run(self, run_id: str, user_id: str, input_text: str) -> None:
         trace = self._client.trace(
+            id=run_id,
             name="chat_turn",
             input=input_text,
             user_id=user_id,
         )
-        run_id = trace.id
         self._traces[run_id] = trace
         self._spans[run_id] = {}
-        return run_id
 
     def log_tool_call(
         self,

@@ -88,14 +88,12 @@ class PgTracer:
 
     # --- TracingPort interface ---
 
-    def start_run(self, user_id: str, input_text: str) -> str:
-        run_id = f"run_{uuid.uuid4().hex[:12]}"
+    def start_run(self, run_id: str, user_id: str, input_text: str) -> None:
         self._execute(
             """INSERT INTO trace_runs (id, user_id, input_text, status, created_at)
                VALUES (%s, %s, %s, %s, %s)""",
             (run_id, user_id, input_text, "running", _utcnow()),
         )
-        return run_id
 
     def log_tool_call(
         self,
