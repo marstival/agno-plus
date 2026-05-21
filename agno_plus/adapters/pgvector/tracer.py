@@ -91,8 +91,9 @@ class PgTracer:
     def start_run(self, user_id: str, input_text: str) -> str:
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         self._execute(
-            "INSERT INTO trace_runs (id, user_id, input_text) VALUES (%s, %s, %s)",
-            (run_id, user_id, input_text),
+            """INSERT INTO trace_runs (id, user_id, input_text, status, created_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (run_id, user_id, input_text, "running", _utcnow()),
         )
         return run_id
 
@@ -107,35 +108,36 @@ class PgTracer:
     ) -> None:
         self._execute(
             """INSERT INTO trace_tool_calls
-               (id, run_id, step, tool_name, tool_args, tool_result, error)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+               (id, run_id, step, tool_name, tool_args, tool_result, error, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 f"tc_{uuid.uuid4().hex[:12]}",
                 run_id, step, tool_name,
-                json.dumps(tool_args), tool_result, error,
+                json.dumps(tool_args), tool_result, error, _utcnow(),
             ),
         )
 
     def log_retrieval(self, run_id: str, source_ref: SourceRef, score: float = 0.0) -> None:
         d = _source_ref_to_dict(source_ref)
         self._execute(
-            """INSERT INTO trace_retrievals (id, run_id, source_type, source_ref, score)
-               VALUES (%s, %s, %s, %s, %s)""",
+            """INSERT INTO trace_retrievals (id, run_id, source_type, source_ref, score, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (
                 f"ret_{uuid.uuid4().hex[:12]}",
                 run_id, d.get("source_type", "unknown"),
-                json.dumps(d), score,
+                json.dumps(d), score, _utcnow(),
             ),
         )
 
     def log_answer(self, run_id: str, answer_text: str, sources: list[SourceRef]) -> None:
         self._execute(
-            """INSERT INTO trace_answers (id, run_id, answer_text, sources_json)
-               VALUES (%s, %s, %s, %s)""",
+            """INSERT INTO trace_answers (id, run_id, answer_text, sources_json, created_at)
+               VALUES (%s, %s, %s, %s, %s)""",
             (
                 f"ans_{uuid.uuid4().hex[:12]}",
                 run_id, answer_text,
-                json.dumps([_source_ref_to_dict(s) for s in sources]),
+                json.dumps([_source_ref_to_dict(s) if hasattr(s, "__dataclass_fields__") else s for s in sources]),
+                _utcnow(),
             ),
         )
 
