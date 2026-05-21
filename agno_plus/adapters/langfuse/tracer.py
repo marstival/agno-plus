@@ -2,13 +2,13 @@
 
 Requires: pip install langfuse>=4
 Env vars consumed by Langfuse SDK automatically:
-  LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST (optional)
+  LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL (optional)
 
 Traces are structured as:
   Root span (= one chat turn, anchored to a Langfuse trace)
-    └─ Tool span per sub-agent invocation
-    └─ Retriever span per retrieval
-    └─ Generation span for the final answer
+    └─ Tool span per sub-agent invocation (ended immediately)
+    └─ Retriever span per retrieval (ended immediately)
+    └─ Generation span for the final answer (ended immediately)
 """
 
 from __future__ import annotations
@@ -40,11 +40,10 @@ class LangfuseTracer:
         if secret_key:
             kwargs["secret_key"] = secret_key
         if host:
-            kwargs["host"] = host
+            kwargs["base_url"] = host  # v4 uses base_url
 
         self._client = Langfuse(**kwargs)
         self._root_spans: dict[str, Any] = {}  # run_id → root LangfuseSpan
-        self._spans: dict[str, Any] = {}       # run_id → {step: span}
 
     # --- TracingPort interface ---
 
@@ -59,9 +58,7 @@ class LangfuseTracer:
             as_type="span",
             input=input_text,
         )
-        root.set_trace_io(input=input_text)
         self._root_spans[run_id] = root
-        self._spans[run_id] = {}
 
     def log_tool_call(
         self,
@@ -75,7 +72,7 @@ class LangfuseTracer:
         root = self._root_spans.get(run_id)
         if root is None:
             return
-        span = root.start_observation(
+        child = root.start_observation(
             name=tool_name,
             as_type="tool",
             input=tool_args,
@@ -83,35 +80,37 @@ class LangfuseTracer:
             level="ERROR" if error else "DEFAULT",
             status_message=error,
         )
-        self._spans[run_id][step] = span
+        child.end()
 
     def log_retrieval(self, run_id: str, source_ref: SourceRef, score: float = 0.0) -> None:
         root = self._root_spans.get(run_id)
         if root is None:
             return
-        root.start_observation(
+        child = root.start_observation(
             name="retrieval",
             as_type="retriever",
             input={"score": score},
             output=_source_ref_to_dict(source_ref),
         )
+        child.end()
 
     def log_answer(self, run_id: str, answer_text: str, sources: list[SourceRef]) -> None:
         root = self._root_spans.get(run_id)
         if root is None:
             return
-        root.start_observation(
+        child = root.start_observation(
             name="final_answer",
             as_type="generation",
             output=answer_text,
             metadata={"sources": [_source_ref_to_dict(s) for s in sources]},
         )
+        child.end()
 
     def complete_run(self, run_id: str, intents: list[str], status: str = "completed") -> None:
         root = self._root_spans.get(run_id)
         if root is None:
             return
         root.update(metadata={"intents": intents, "status": status})
+        root.end()
         self._client.flush()
         self._root_spans.pop(run_id, None)
-        self._spans.pop(run_id, None)
