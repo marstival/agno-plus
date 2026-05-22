@@ -28,4 +28,8 @@ pip install "agno-plus[all] @ git+https://github.com/<org>/agno-plus.git"
 
 ## Status
 
-Pre-implementation — see `AGNO_EXTENSION.md` (in the reference repo) for the full specification.
+Core layer is implemented: `SpreadsheetReader`, `AudioReader`, `ImageReader`, `TemporalGrounder`, `EpisodicMemoryGrounder`, `IngestionPipeline` with job state tracking, `SourceRef` types, `TracingPort` + `PgTracer` + `LangfuseTracer`. See `AGNO_EXTENSION.md` for the full specification.
+
+Pending: React UI components (`UploadWidget`, `JobStatusWidget`, `KnowledgeBrowser`), LangChain adapter wrappers.
+
+Primary consumer: `agno-projects/agentic-aide` (personal assistant app).

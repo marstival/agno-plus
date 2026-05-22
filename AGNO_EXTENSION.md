@@ -1,7 +1,7 @@
 # agno-plus — Extension Layer Specification
 
-> **Status:** Pre-implementation specification  
-> **Location note:** This file lives temporarily in `personal-agentic-aide` while the new repo is being set up. The personal assistant in this repo is the reference implementation that informed the design but will not be migrated — it remains as-is.
+> **Status:** Implemented — core pipeline, readers, time grounding, and pipeline are complete. UI components and LangChain adapters are pending.  
+> **Reference application:** `/Users/stival/Projetos/personal-agentic-aide` (read-only reference, do not modify). The `agentic-aide` repo at `agno-projects/agentic-aide` is the primary consumer application.
 
 ---
 
@@ -258,6 +258,17 @@ pending → processing → completed
 ```
 
 Each job tracks steps: `read → ground → chunk → embed → upsert`.
+
+After each step, `JobStatus` is updated:
+
+| Field | Set after step | Content |
+|---|---|---|
+| `extraction_payload` | READ | `list[dict]` — each `Document` from the reader serialized to `{id, source_type, source_name, content, metadata}` |
+| `chunks_count` | CHUNK | `int` — number of chunks produced |
+| `completed_steps` | each step | list of completed `JobStep` values |
+| `state` | end | `completed` or `failed` |
+
+`extraction_payload` is available via `pipeline.status(job_id).extraction_payload` after the job finishes. Application code can persist this to a DB for user-facing extraction preview without re-running the reader.
 
 #### Pipeline Steps (ordered)
 
