@@ -84,6 +84,8 @@ class JobStatus:
     current_step: JobStep | None = None
     completed_steps: list[JobStep] = field(default_factory=list)
     error: str | None = None
+    extraction_payload: list[dict] | None = None  # documents from read step
+    chunks_count: int = 0
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 

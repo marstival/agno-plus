@@ -95,6 +95,16 @@ class IngestionPipeline:
             # Step 1: Read
             status.current_step = JobStep.READ
             documents = self._step_read(source, filename)
+            status.extraction_payload = [
+                {
+                    "id": doc.id,
+                    "source_type": doc.source_type,
+                    "source_name": doc.source_name,
+                    "content": doc.content,
+                    "metadata": doc.metadata,
+                }
+                for doc in documents
+            ]
             status.completed_steps.append(JobStep.READ)
 
             # Step 2: Ground
@@ -106,6 +116,7 @@ class IngestionPipeline:
             # Step 3: Chunk
             status.current_step = JobStep.CHUNK
             chunks_text = self._step_chunk(documents)
+            status.chunks_count = len(chunks_text)
             status.completed_steps.append(JobStep.CHUNK)
 
             # Step 4–5: Embed + Upsert (delegated to MemoryStore)
