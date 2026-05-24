@@ -49,15 +49,15 @@ tests/
 
 Steps in sequence — each has a natural test boundary before moving to the next:
 
-- [ ] 1. `core/models.py` — `Document`, `Chunk`, `IngestionResult`, `MemoryRecord`, `JobStatus`
-- [ ] 2. `core/time_grounding/` — `TemporalGrounder`, `GroundingMode`, `EpisodicMemoryGrounder`
-- [ ] 3. `core/readers/spreadsheet.py` — 3-layer pipeline (port from reference codebase)
-- [ ] 4. `core/pipeline/` — `IngestionWorker` protocol, job state machine, chunking
-- [ ] 5. `adapters/agno/` — thin wrappers for readers + memory store
+- [x] 1. `core/models.py` — `Document`, `Chunk`, `IngestionResult`, `MemoryRecord`, `JobStatus`
+- [x] 2. `core/time_grounding/` — `TemporalGrounder`, `GroundingMode`, `EpisodicMemoryGrounder`
+- [x] 3. `core/readers/spreadsheet.py` — 3-layer pipeline (port from reference codebase)
+- [x] 4. `core/pipeline/` — `IngestionWorker` protocol, job state machine, chunking
+- [x] 5. `adapters/agno/` — thin wrappers for readers + memory store
 - [ ] 6. `examples/personal-aide-minimal/` — end-to-end: ingest a spreadsheet, ask a question
-- [ ] 7. `core/readers/audio.py` and `core/readers/image.py` — STT and OCR
-- [ ] 8. `adapters/langchain/` — LangChain loader wrappers
-- [ ] 9. `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser
+- [x] 7. `core/readers/audio.py` and `core/readers/image.py` — STT and OCR
+- [x] 8. `adapters/langchain/` — LangChain loader wrappers
+- [x] 9. `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser
 
 ## Key design decisions already made
 
