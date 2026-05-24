@@ -54,7 +54,7 @@ Steps in sequence — each has a natural test boundary before moving to the next
 - [x] 3. `core/readers/spreadsheet.py` — 3-layer pipeline (port from reference codebase)
 - [x] 4. `core/pipeline/` — `IngestionWorker` protocol, job state machine, chunking
 - [x] 5. `adapters/agno/` — thin wrappers for readers + memory store
-- [ ] 6. `examples/personal-aide-minimal/` — end-to-end: ingest a spreadsheet, ask a question
+- [x] 6. `examples/personal-aide-minimal/` — end-to-end: ingest a spreadsheet, ask a question
 - [x] 7. `core/readers/audio.py` and `core/readers/image.py` — STT and OCR
 - [x] 8. `adapters/langchain/` — LangChain loader wrappers
 - [x] 9. `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser

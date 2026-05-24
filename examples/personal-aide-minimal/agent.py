@@ -1,12 +1,10 @@
-"""Minimal end-to-end example: ingest a spreadsheet, answer a question.
+"""Minimal end-to-end example: ingest a spreadsheet, search episodic memory.
 
-Run:
+Run from the repo root:
     python examples/personal-aide-minimal/agent.py
 
-Requires only the core + agno extras:
+Requires only the core extras (no LLM API key needed):
     pip install agno-plus[agno]
-
-Set OPENAI_API_KEY in the environment before running.
 """
 
 from __future__ import annotations
