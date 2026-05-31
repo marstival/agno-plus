@@ -4,6 +4,13 @@ Layer A (page parser)  → pdfplumber extracts per-page tables and text regions
 Layer B (classifier)   → TABLE (pdfplumber-detected), TEXT (prose), NOTE (short)
 Layer C (extractor)    → TableRow / NoteItem records → one Document per block
 
+Header recovery strategy (in priority order):
+  1. Text region just above the table bbox — words are assigned to columns using
+     the table's own cell x-ranges, so multi-word headers like "UNIT PRICE" and
+     "LINE TOTAL" are grouped correctly.
+  2. First row of extracted cells, if it passes the _is_header_row heuristic.
+  3. Generic col_0, col_1, … names when neither of the above applies.
+
 Falls back to pypdf plain-text extraction when pdfplumber finds no content
 (scanned PDFs without embedded text).
 
@@ -16,7 +23,7 @@ import io
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -25,6 +32,12 @@ from agno_plus.core.models import Document
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = frozenset({".pdf"})
+
+# How far above the table top (in PDF points) to search for a header row.
+_HEADER_SEARCH_MARGIN = 40.0
+# A word is considered "close to the table" if its bottom edge is within this
+# many points of the table's top boundary.
+_HEADER_WORD_PROXIMITY = 25.0
 
 
 class _BlockType(str, Enum):
@@ -36,9 +49,10 @@ class _BlockType(str, Enum):
 @dataclass
 class _PdfBlock:
     block_type: _BlockType
-    page_number: int            # 1-based
-    raw_cells: list[list[str]] | None = None   # TABLE blocks only
-    raw_text: str | None = None                # TEXT / NOTE blocks only
+    page_number: int                              # 1-based
+    raw_cells: list[list[str]] | None = None      # TABLE blocks only
+    raw_text: str | None = None                   # TEXT / NOTE blocks only
+    external_headers: list[str] | None = None     # headers found above the table
 
 
 class IntelligentPdfReader:
@@ -74,7 +88,7 @@ class IntelligentPdfReader:
         tables = []
         for block in blocks:
             if block.block_type == _BlockType.TABLE and block.raw_cells:
-                table = self._cells_to_table_dict(block.raw_cells)
+                table = self._cells_to_table_dict(block.raw_cells, block.external_headers)
                 if table:
                     tables.append(table)
         return tables
@@ -120,13 +134,17 @@ class IntelligentPdfReader:
                     [str(cell).strip() if cell is not None else "" for cell in row]
                     for row in cells
                 ]
-                if any(any(row) for row in normalized):
-                    blocks.append(_PdfBlock(
-                        block_type=_BlockType.TABLE,
-                        page_number=page_num,
-                        raw_cells=normalized,
-                    ))
-                    table_bboxes.append(tbl.bbox)
+                if not any(any(row) for row in normalized):
+                    continue
+
+                external_headers = self._find_header_above_table(page, tbl)
+                blocks.append(_PdfBlock(
+                    block_type=_BlockType.TABLE,
+                    page_number=page_num,
+                    raw_cells=normalized,
+                    external_headers=external_headers,
+                ))
+                table_bboxes.append(tbl.bbox)
             except Exception as exc:
                 logger.debug("Table extraction failed page %d: %s", page_num, exc)
 
@@ -140,6 +158,73 @@ class IntelligentPdfReader:
             blocks.append(_PdfBlock(block_type=btype, page_number=page_num, raw_text=chunk))
 
         return blocks
+
+    def _find_header_above_table(self, page: Any, tbl: Any) -> list[str] | None:
+        """Find column labels in the text region just above the table bbox.
+
+        Assigns words to columns using the table's own cell x-ranges so that
+        multi-word headers like "UNIT PRICE" or "LINE TOTAL" are grouped correctly.
+        Returns None if no usable header row is found.
+        """
+        try:
+            x0, top, x1, _bottom = tbl.bbox
+            search_top = max(0, top - _HEADER_SEARCH_MARGIN)
+            if search_top >= top:
+                return None
+
+            # Get column x-ranges from the first row's cell bounding boxes
+            if not tbl.rows:
+                return None
+            first_row_cells = [c for c in tbl.rows[0].cells if c is not None]
+            if not first_row_cells:
+                return None
+            col_ranges = [(c[0], c[2]) for c in first_row_cells]  # (x0, x1) per column
+            col_count = len(col_ranges)
+
+            # Extract words from the region above the table
+            header_region = page.crop((x0, search_top, x1, top))
+            words = header_region.extract_words(keep_blank_chars=False)
+            if not words:
+                return None
+
+            # Keep only words whose bottom edge is close to the table top —
+            # i.e. the last text line before the table starts.
+            close_words = [w for w in words if (top - w.get("bottom", 0)) <= _HEADER_WORD_PROXIMITY]
+            if not close_words:
+                close_words = words  # fallback: use all words in region
+
+            # Assign each word to the column whose x-range contains the word's center.
+            # Fall back to nearest center when the word center falls between columns.
+            col_words: dict[int, list[str]] = {i: [] for i in range(col_count)}
+            for word in close_words:
+                wx_center = (word["x0"] + word["x1"]) / 2
+                assigned: int | None = None
+                for ci, (cx0, cx1) in enumerate(col_ranges):
+                    if cx0 <= wx_center <= cx1:
+                        assigned = ci
+                        break
+                if assigned is None:
+                    assigned = min(
+                        range(col_count),
+                        key=lambda ci: abs((col_ranges[ci][0] + col_ranges[ci][1]) / 2 - wx_center),
+                    )
+                col_words[assigned].append(word["text"])
+
+            headers = [" ".join(col_words[i]) for i in range(col_count)]
+
+            # Validate: at least half the columns have text, and they look like labels.
+            non_empty = [h for h in headers if h.strip()]
+            if len(non_empty) < max(1, col_count // 2):
+                return None
+            if not self._is_header_row(non_empty):
+                return None
+
+            logger.debug("Recovered headers above table: %s", headers)
+            return headers
+
+        except Exception as exc:
+            logger.debug("Header-above-table search failed: %s", exc)
+            return None
 
     def _extract_non_table_text(
         self, page: Any, table_bboxes: list[tuple[float, float, float, float]]
@@ -169,8 +254,7 @@ class IntelligentPdfReader:
     def _is_header_row(self, row: list[str]) -> bool:
         """Return True if this row looks like column labels rather than data values.
 
-        A header row has mostly text labels. A data row has numeric values,
-        currency amounts, or a mix — more than 1/3 numeric cells signals data.
+        More than 1/3 numeric cells signals a data row, not a header row.
         """
         non_empty = [c.strip() for c in row if c.strip()]
         if not non_empty:
@@ -185,18 +269,25 @@ class IntelligentPdfReader:
                 pass
         return numeric_count <= len(non_empty) / 3
 
-    def _cells_to_table_dict(self, cells: list[list[str]]) -> dict | None:
+    def _cells_to_table_dict(
+        self,
+        cells: list[list[str]],
+        forced_headers: list[str] | None = None,
+    ) -> dict | None:
         """Convert raw cell array to {headers, rows} dict.
 
-        If the first row looks like data (numeric values, currency amounts) rather
-        than column labels, generic column names are generated and all rows are
-        treated as data. This handles PDFs where the visual header row was styled
-        differently and captured outside the table boundary by pdfplumber.
+        Header resolution priority:
+          1. forced_headers — labels recovered from the text above the table.
+          2. cells[0] if it passes _is_header_row.
+          3. Generic col_0, col_1, … names.
         """
         if not cells:
             return None
 
-        if self._is_header_row(cells[0]):
+        if forced_headers:
+            raw_headers = forced_headers
+            data_rows = cells
+        elif self._is_header_row(cells[0]):
             raw_headers = cells[0]
             data_rows = cells[1:]
         else:
@@ -207,6 +298,7 @@ class IntelligentPdfReader:
         if not any(h.strip() for h in raw_headers) or not data_rows:
             return None
 
+        # Deduplicate headers
         seen: dict[str, int] = {}
         unique: list[str] = []
         for i, h in enumerate(raw_headers):
@@ -228,7 +320,7 @@ class IntelligentPdfReader:
 
     def _render_table(self, block: _PdfBlock) -> str:
         assert block.raw_cells
-        table = self._cells_to_table_dict(block.raw_cells)
+        table = self._cells_to_table_dict(block.raw_cells, block.external_headers)
         if not table:
             return ""
         headers = table["headers"]
