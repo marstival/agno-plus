@@ -166,12 +166,45 @@ class IntelligentPdfReader:
     # Layer B/C — classify and render
     # ------------------------------------------------------------------
 
+    def _is_header_row(self, row: list[str]) -> bool:
+        """Return True if this row looks like column labels rather than data values.
+
+        A header row has mostly text labels. A data row has numeric values,
+        currency amounts, or a mix — more than 1/3 numeric cells signals data.
+        """
+        non_empty = [c.strip() for c in row if c.strip()]
+        if not non_empty:
+            return False
+        numeric_count = 0
+        for cell in non_empty:
+            cleaned = cell.lstrip("$€£¥+-(").rstrip("%)").replace(",", "").replace(" ", "")
+            try:
+                float(cleaned)
+                numeric_count += 1
+            except ValueError:
+                pass
+        return numeric_count <= len(non_empty) / 3
+
     def _cells_to_table_dict(self, cells: list[list[str]]) -> dict | None:
-        """Convert raw cell array to {headers, rows} dict."""
-        if len(cells) < 2:
+        """Convert raw cell array to {headers, rows} dict.
+
+        If the first row looks like data (numeric values, currency amounts) rather
+        than column labels, generic column names are generated and all rows are
+        treated as data. This handles PDFs where the visual header row was styled
+        differently and captured outside the table boundary by pdfplumber.
+        """
+        if not cells:
             return None
-        raw_headers = cells[0]
-        if not any(raw_headers):
+
+        if self._is_header_row(cells[0]):
+            raw_headers = cells[0]
+            data_rows = cells[1:]
+        else:
+            width = max(len(r) for r in cells)
+            raw_headers = [f"col_{i}" for i in range(width)]
+            data_rows = cells
+
+        if not any(h.strip() for h in raw_headers) or not data_rows:
             return None
 
         seen: dict[str, int] = {}
@@ -186,7 +219,7 @@ class IntelligentPdfReader:
                 unique.append(h)
 
         rows = []
-        for row in cells[1:]:
+        for row in data_rows:
             record = {unique[i]: (row[i] if i < len(row) else "") for i in range(len(unique))}
             if any(v.strip() for v in record.values()):
                 rows.append(record)
