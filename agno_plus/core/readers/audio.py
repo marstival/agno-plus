@@ -40,6 +40,13 @@ class AudioReader:
         self._api_key = api_key
         self._local_model: Any = None
 
+    def transcribe(self, source: bytes, filename: str = "recording.webm") -> str:
+        """Transcribe audio bytes to text. Returns the raw transcript string.
+
+        Useful for real-time voice input (chat STT) where a Document wrapper is not needed.
+        """
+        return self._transcribe(source, filename)
+
     def read(self, source: bytes | str, filename: str = "audio.mp3", **kwargs: Any) -> list[Document]:
         if isinstance(source, str):
             source = source.encode()

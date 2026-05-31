@@ -30,13 +30,17 @@ image = [
     "openai>=1.0",
     "Pillow>=10.0",
 ]
+pdf = [
+    "pdfplumber>=0.11",
+    "pypdf>=4.0",
+]
 pgvector = [
     "psycopg2-binary>=2.9",
     "pgvector>=0.3",
     "sqlalchemy>=2.0",
 ]
 all = [
-    "agno-plus[agno,langchain,audio,image,pgvector]",
+    "agno-plus[agno,langchain,audio,image,pgvector,pdf]",
 ]
 dev = [
     "pytest>=8.0",
