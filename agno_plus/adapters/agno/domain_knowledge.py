@@ -70,6 +70,18 @@ class DomainKnowledge:
     async def aget_tools(self, **kwargs: Any) -> List[Callable]:
         return self.get_tools(**kwargs)
 
+    def get_valid_filters(self) -> set[str]:
+        """Return metadata keys available for agentic filtering.
+
+        These keys are stored in chunk metadata during ingestion.
+        Enables enable_agentic_knowledge_filters=True on the agent when
+        domain_name is also stored in chunk metadata.
+        """
+        return {"domain_id", "filename"}
+
+    async def aget_valid_filters(self) -> set[str]:
+        return self.get_valid_filters()
+
     def retrieve(self, query: str, **kwargs: Any) -> List[AgnoDocument]:
         _filters = kwargs.get("filters") or {}
         user_id: str = kwargs.get("user_id") or (
