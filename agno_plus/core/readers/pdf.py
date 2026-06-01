@@ -39,6 +39,14 @@ _HEADER_SEARCH_MARGIN = 40.0
 # many points of the table's top boundary.
 _HEADER_WORD_PROXIMITY = 25.0
 
+# Stream extraction — used for borderless tables (no drawn cell lines).
+_STREAM_Y_TOL    =  6.0   # words within this vertical range → same row
+_STREAM_CELL_GAP = 15.0   # horizontal gap larger than this splits cells
+_STREAM_ROW_GAP  = 48.0   # vertical gap larger than this splits table blocks
+_STREAM_COL_TOL  = 40.0   # column centers within this range → same column
+_STREAM_MIN_COLS =  2     # minimum columns to be considered a table
+_STREAM_MIN_ROWS =  2     # minimum rows to be considered a table
+
 
 class _BlockType(str, Enum):
     TABLE = "table"
@@ -148,6 +156,16 @@ class IntelligentPdfReader:
             except Exception as exc:
                 logger.debug("Table extraction failed page %d: %s", page_num, exc)
 
+        if not table_bboxes:
+            for cells, bbox in self._stream_extract_tables(page):
+                blocks.append(_PdfBlock(
+                    block_type=_BlockType.TABLE,
+                    page_number=page_num,
+                    raw_cells=cells,
+                    external_headers=None,
+                ))
+                table_bboxes.append(bbox)
+
         non_table = self._extract_non_table_text(page, table_bboxes)
         for chunk in re.split(r"\n{2,}", non_table):
             chunk = chunk.strip()
@@ -225,6 +243,116 @@ class IntelligentPdfReader:
         except Exception as exc:
             logger.debug("Header-above-table search failed: %s", exc)
             return None
+
+    def _stream_extract_tables(
+        self, page: Any
+    ) -> list[tuple[list[list[str]], tuple[float, float, float, float]]]:
+        """Detect tables in pages without drawn borders using word-position analysis.
+
+        Algorithm:
+          1. Group words into horizontal bands by y-proximity (_STREAM_Y_TOL).
+          2. Split each band into cells at x-gaps > _STREAM_CELL_GAP.
+          3. Split rows into table candidates at vertical gaps > _STREAM_ROW_GAP.
+          4. Cluster cell x-centers per candidate (_STREAM_COL_TOL) to form columns.
+          5. Assign each cell to the nearest column center.
+
+        Returns (cells_matrix, page_bbox) pairs. bbox is used to exclude the
+        stream table region from plain-text extraction.
+        """
+        try:
+            words = page.extract_words(keep_blank_chars=False, x_tolerance=3, y_tolerance=3)
+        except Exception:
+            return []
+        if not words:
+            return []
+
+        # Step 1 — band words by y-top proximity (use first word of band as anchor).
+        words_sorted = sorted(words, key=lambda w: (w["top"], w["x0"]))
+        row_bands: list[list[dict]] = []
+        for word in words_sorted:
+            placed = False
+            for band in row_bands:
+                if abs(word["top"] - band[0]["top"]) <= _STREAM_Y_TOL:
+                    band.append(word)
+                    placed = True
+                    break
+            if not placed:
+                row_bands.append([word])
+
+        # Step 2 — split each band into cells; keep only multi-column rows.
+        # Entry: (y_top, y_bottom, [(x_center, text), ...])
+        structured_rows: list[tuple[float, float, list[tuple[float, str]]]] = []
+        for band in row_bands:
+            band.sort(key=lambda w: w["x0"])
+            cells: list[tuple[float, str]] = []
+            cur: list[dict] = [band[0]]
+            for word in band[1:]:
+                if word["x0"] - cur[-1]["x1"] > _STREAM_CELL_GAP:
+                    cx = (cur[0]["x0"] + cur[-1]["x1"]) / 2
+                    cells.append((cx, " ".join(w["text"] for w in cur)))
+                    cur = [word]
+                else:
+                    cur.append(word)
+            cx = (cur[0]["x0"] + cur[-1]["x1"]) / 2
+            cells.append((cx, " ".join(w["text"] for w in cur)))
+            if len(cells) >= _STREAM_MIN_COLS:
+                y_top = min(w["top"] for w in band)
+                y_bot = max(w["bottom"] for w in band)
+                structured_rows.append((y_top, y_bot, cells))
+
+        if not structured_rows:
+            return []
+
+        # Step 3 — split into candidate groups at large vertical gaps.
+        groups: list[list[tuple[float, float, list[tuple[float, str]]]]] = []
+        cur_group: list[tuple[float, float, list[tuple[float, str]]]] = [structured_rows[0]]
+        for i in range(1, len(structured_rows)):
+            prev_bot = structured_rows[i - 1][1]
+            curr_top = structured_rows[i][0]
+            if curr_top - prev_bot > _STREAM_ROW_GAP:
+                groups.append(cur_group)
+                cur_group = []
+            cur_group.append(structured_rows[i])
+        groups.append(cur_group)
+
+        # Step 4 — for each group: cluster columns, assign cells, compute bbox.
+        results: list[tuple[list[list[str]], tuple[float, float, float, float]]] = []
+        for group in groups:
+            if len(group) < _STREAM_MIN_ROWS:
+                continue
+            all_cx = [cx for _, _, cells in group for cx, _ in cells]
+            col_centers = self._cluster_centers(all_cx, _STREAM_COL_TOL)
+            if len(col_centers) < _STREAM_MIN_COLS:
+                continue
+
+            table_rows: list[list[str]] = []
+            for _, _, cells in group:
+                row: list[str] = [""] * len(col_centers)
+                for cx, text in cells:
+                    ci = min(range(len(col_centers)), key=lambda i: abs(col_centers[i] - cx))
+                    row[ci] = (row[ci] + " " + text).strip() if row[ci] else text
+                table_rows.append(row)
+
+            gy0 = group[0][0]
+            gy1 = group[-1][1]
+            gx0 = min(w["x0"] for w in words if gy0 - 2 <= w["top"] <= gy1 + 2)
+            gx1 = max(w["x1"] for w in words if gy0 - 2 <= w["top"] <= gy1 + 2)
+            results.append((table_rows, (gx0, gy0, gx1, gy1)))
+
+        return results
+
+    def _cluster_centers(self, centers: list[float], tol: float) -> list[float]:
+        """Merge nearby x-centers into representative column anchors."""
+        if not centers:
+            return []
+        sorted_c = sorted(centers)
+        clusters: list[list[float]] = [[sorted_c[0]]]
+        for c in sorted_c[1:]:
+            if c - clusters[-1][-1] <= tol:
+                clusters[-1].append(c)
+            else:
+                clusters.append([c])
+        return [sum(cl) / len(cl) for cl in clusters]
 
     def _extract_non_table_text(
         self, page: Any, table_bboxes: list[tuple[float, float, float, float]]
