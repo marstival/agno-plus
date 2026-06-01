@@ -426,7 +426,104 @@ Each step has a natural test boundary. Steps 1–6 prove the core value proposit
 
 ---
 
-## 12. Open Questions
+## 12. Structured Domain Pattern (PDF/Spreadsheet → SQL + Semantic)
+
+### 12.1 Overview
+
+Structured domains store tabular data in dynamic PostgreSQL tables (`sd_<id>_<label>`) while also making full document content available for vector search. Two ingestion strategies are provided:
+
+**Option A — Dual-write (always):** Every PDF ingested into a structured domain also has all its blocks (prose + tables as markdown) written to the semantic knowledge store. This ensures the full document is searchable even when only the structured table is queried by SQL.
+
+**Option B — LLM metadata columns (opt-in):** An LLM extracts named key-value fields from non-table text (e.g., invoice number, customer ID, due date) and injects them as additional SQL columns on every row. This enables SQL predicates like `WHERE invoice_number = '100'` without requiring a vector search to first locate context.
+
+### 12.2 DDL Utilities (`core/structured.py`)
+
+Framework-agnostic helpers that any application can use to manage dynamic tables:
+
+```python
+from agno_plus.core.structured import (
+    safe_col_name,        # "Unit Price" → "unit_price"
+    infer_pg_type,        # ["1", "2", "3"] → "BIGINT"
+    infer_column_types,   # {header: pg_type} for a list of rows
+    create_dynamic_table, # DROP + CREATE with inferred types + optional GRANT
+    bulk_insert,          # batch insert rows into a dynamic table
+    fetch_sample_rows,    # first N rows excluding _row_id
+    drop_table,           # DROP TABLE IF EXISTS
+    ALLOWED_PG_TYPES,     # {"TEXT", "BIGINT", "NUMERIC", "DATE", "TIMESTAMPTZ", "BOOLEAN"}
+)
+```
+
+Type inference is intentionally conservative: values are tested as `int → float → ISO date/datetime → TEXT` so numeric columns are stored efficiently and date arithmetic works in SQL.
+
+### 12.3 KnowledgeStore (`adapters/agno/knowledge_store.py`)
+
+Wraps Agno's `PgVector` with domain/user scoping, chunking, and optional registry writes. Satisfies the `SearchableStore` protocol used by `DomainKnowledge`.
+
+```python
+from agno_plus.adapters.agno import KnowledgeStore
+
+store = KnowledgeStore(
+    engine=my_engine,
+    embedder=my_embedder,
+    db_url="postgresql://...",   # optional: for Agno registry writes
+)
+
+# Dual-write: ingest all blocks from a PDF reader run
+total_chunks = store.ingest_documents(
+    docs=pdf_reader.read(pdf_bytes, "invoice.pdf"),
+    domain_id="d1",
+    user_id="u1",
+    filename="invoice.pdf",
+)
+
+# Search with domain/user isolation
+results = store.search("total amount", user_id="u1", domain_id="d1")
+```
+
+### 12.4 LLM Call Helper (`adapters/llm.py`)
+
+Unified helper that eliminates the OpenAI/Ollama switch boilerplate that would otherwise be duplicated across every LLM-calling service:
+
+```python
+from agno_plus.adapters.llm import call_llm
+
+text = call_llm(
+    "Describe this column: qty",
+    backend="openai",
+    model="gpt-4o-mini",
+    api_key="sk-...",
+)
+
+json_str = call_llm(
+    "Extract named fields as JSON",
+    backend="ollama",
+    model="llama3.2",
+    base_url="http://localhost:11434",
+    json_response=True,
+    max_tokens=400,
+)
+```
+
+### 12.5 StorageBackend (`core/storage.py`)
+
+Protocol + local implementation for raw file persistence:
+
+```python
+from agno_plus.core.storage import StorageBackend, LocalStorageBackend
+from pathlib import Path
+
+storage = LocalStorageBackend(root=Path("/uploads"))
+key = storage.save(user_id, file_id, filename, data)
+url = storage.get_url(key)   # None → serve via FileResponse
+path = storage.resolve(key)  # Path | None
+storage.delete(key)
+```
+
+Implement `StorageBackend` (a `runtime_checkable` Protocol) to add S3, GCS, or MinIO support without changing callers.
+
+---
+
+## 13. Open Questions
 
 - [ ] Repo name: `agno-plus` is a working name — confirm or rename before creating the repo
 - [ ] Whether to contribute `SpreadsheetReader` (merged cell fix) upstream to Agno as a PR alongside keeping the extended version here

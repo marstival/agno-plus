@@ -39,8 +39,15 @@ pgvector = [
     "pgvector>=0.3",
     "sqlalchemy>=2.0",
 ]
+llm = [
+    "openai>=1.0",
+    "httpx>=0.27",
+]
+structured = [
+    "sqlalchemy>=2.0",
+]
 all = [
-    "agno-plus[agno,langchain,audio,image,pgvector,pdf]",
+    "agno-plus[agno,langchain,audio,image,pgvector,pdf,llm,structured]",
 ]
 dev = [
     "pytest>=8.0",
