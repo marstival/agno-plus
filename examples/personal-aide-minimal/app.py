@@ -128,7 +128,13 @@ def _init_langfuse() -> None:
         return
     try:
         from langfuse import Langfuse
-        _lf = Langfuse(public_key=pk, secret_key=sk, host=host)
+        client = Langfuse(public_key=pk, secret_key=sk, host=host)
+        # Verify this is the v2 SDK that exposes the low-level trace() API
+        if not callable(getattr(client, "trace", None)):
+            print("[warn] langfuse SDK does not support the v2 trace() API; "
+                  "pin langfuse<3.0 in requirements.txt — tracing disabled")
+            return
+        _lf = client
         print(f"[langfuse] tracing to {host}")
     except ImportError:
         print("[warn] langfuse package not installed; tracing disabled")
