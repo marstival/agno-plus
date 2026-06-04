@@ -27,7 +27,7 @@ from typing import Any
 
 import sqlalchemy as sa
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -175,12 +175,20 @@ def _finish_job(jid: str, *, error: str | None = None) -> None:
 
 
 def _csv_to_dicts(content: bytes, filename: str) -> tuple[list[str], list[dict]]:
-    """Parse CSV/TSV → (headers, row_dicts)."""
-    dialect = "excel-tab" if filename.endswith(".tsv") else "excel"
-    reader = csv.DictReader(io.StringIO(content.decode("utf-8", errors="replace")), dialect=dialect)
+    """Parse CSV/TSV → (headers, row_dicts), auto-detecting the delimiter."""
+    text = content.decode("utf-8", errors="replace")
+    if filename.endswith(".tsv"):
+        delimiter = "\t"
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+            delimiter = dialect.delimiter
+        except csv.Error:
+            delimiter = ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     rows = list(reader)
-    headers = reader.fieldnames or (list(rows[0].keys()) if rows else [])
-    return list(headers), rows
+    headers = list(reader.fieldnames) if reader.fieldnames else (list(rows[0].keys()) if rows else [])
+    return headers, rows
 
 
 def _xlsx_to_dicts(content: bytes) -> tuple[list[str], list[dict]]:
@@ -274,10 +282,9 @@ def _ingest_document(jid: str, file_id: str, content: bytes, filename: str) -> N
     _finish_job(jid)
 
 
-def _run_ingest(jid: str, file_id: str, content: bytes, filename: str) -> None:
+def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type: str) -> None:
     try:
-        ext = Path(filename).suffix.lower()
-        if ext in (".csv", ".tsv", ".xlsx", ".xls"):
+        if src_type == "structured":
             _ingest_structured(jid, file_id, content, filename)
         else:
             _ingest_document(jid, file_id, content, filename)
@@ -312,11 +319,20 @@ def health() -> dict[str, str]:
 
 
 @app.post("/ingest")
-async def ingest(file: UploadFile = File(...)) -> dict[str, str]:
+async def ingest(
+    file: UploadFile = File(...),
+    ingest_mode: str = Form("auto"),  # "auto" | "structured" | "semantic"
+) -> dict[str, str]:
     content  = await file.read()
     filename = file.filename or "upload"
     ext      = Path(filename).suffix.lower()
-    src_type = "structured" if ext in (".csv", ".tsv", ".xlsx", ".xls") else "document"
+    is_spreadsheet = ext in (".csv", ".tsv", ".xlsx", ".xls")
+    if ingest_mode == "structured" and is_spreadsheet:
+        src_type = "structured"
+    elif ingest_mode == "semantic":
+        src_type = "document"
+    else:
+        src_type = "structured" if is_spreadsheet else "document"
 
     file_id     = f"f_{uuid.uuid4().hex[:10]}"
     storage_key = storage.save(USER_ID, file_id, filename, content)
@@ -328,7 +344,7 @@ async def ingest(file: UploadFile = File(...)) -> dict[str, str]:
         )
 
     jid = _new_job()
-    threading.Thread(target=_run_ingest, args=(jid, file_id, content, filename), daemon=True).start()
+    threading.Thread(target=_run_ingest, args=(jid, file_id, content, filename, src_type), daemon=True).start()
     return {"job_id": jid, "file_id": file_id}
 
 
@@ -418,9 +434,60 @@ def raw_file(file_id: str) -> FileResponse:
 _annotations: dict[str, dict[str, Any]] = {}  # table_name → annotation dict
 
 
+_PG_TYPE_MAP = {
+    "integer": "BIGINT", "bigint": "BIGINT", "smallint": "BIGINT",
+    "numeric": "NUMERIC", "real": "NUMERIC", "double precision": "NUMERIC",
+    "text": "TEXT", "character varying": "TEXT", "character": "TEXT", "varchar": "TEXT",
+    "date": "DATE",
+    "timestamp with time zone": "TIMESTAMPTZ",
+    "timestamp without time zone": "TIMESTAMPTZ",
+    "boolean": "BOOLEAN",
+}
+
+
 @app.get("/ingest/structured/{domain_id}/{table_name}/sample")
 def table_sample(domain_id: str, table_name: str) -> dict[str, Any]:
     return {"rows": fetch_sample_rows(engine, table_name, limit=5)}
+
+
+@app.get("/ingest/structured/{domain_id}/{table_name}/annotation")
+def get_annotation(domain_id: str, table_name: str) -> dict[str, Any]:
+    """Return column types (from DB schema) merged with stored descriptions."""
+    with engine.connect() as conn:
+        cols = conn.execute(
+            text("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = :t
+                  AND column_name != '_row_id'
+                ORDER BY ordinal_position
+            """),
+            {"t": table_name},
+        ).fetchall()
+        try:
+            row_count = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar() or 0
+        except Exception:
+            row_count = 0
+
+    stored = _annotations.get(table_name, {})
+    # stored["columns"] is a list [{name, description, type}] from the PATCH body
+    stored_col_map: dict[str, dict] = {}
+    if isinstance(stored.get("columns"), list):
+        stored_col_map = {c["name"]: c for c in stored["columns"]}
+
+    return {
+        "annotation": {
+            "description": stored.get("description", ""),
+            "row_count": row_count,
+            "columns": {
+                col: {
+                    "type": stored_col_map.get(col, {}).get("type") or _PG_TYPE_MAP.get(dtype.lower(), "TEXT"),
+                    "description": stored_col_map.get(col, {}).get("description", ""),
+                }
+                for col, dtype in cols
+            },
+        }
+    }
 
 
 @app.patch("/ingest/structured/{domain_id}/{table_name}/annotation")

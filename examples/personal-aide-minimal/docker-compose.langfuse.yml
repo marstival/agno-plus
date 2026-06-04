@@ -36,7 +36,7 @@ services:
       LANGFUSE_INIT_PROJECT_SECRET_KEY:  lf-sk-aide-local-secret-key
       LANGFUSE_INIT_USER_EMAIL:          admin@aide.local
       LANGFUSE_INIT_USER_NAME:           Admin
-      LANGFUSE_INIT_USER_PASSWORD:       aide_admin_password
+      LANGFUSE_INIT_USER_PASSWORD:       Admin
       CLICKHOUSE_MIGRATION_URL:          clickhouse://clickhouse:9000
       CLICKHOUSE_URL:                    http://clickhouse:8123
       CLICKHOUSE_USER:                   langfuse
