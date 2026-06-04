@@ -35,7 +35,6 @@ from sqlalchemy import text
 
 from agno_plus.core.storage import LocalStorageBackend
 from agno_plus.adapters.llm import call_llm
-from agno_plus.adapters.agno.knowledge_store import KnowledgeStore
 from agno_plus.core.structured import (
     bulk_insert,
     create_dynamic_table,
@@ -90,12 +89,13 @@ def _init_db() -> None:
         """))
 
 
-def _build_knowledge_store() -> KnowledgeStore | None:
-    """Lazy singleton — returns None if embedder is unavailable."""
+def _build_knowledge_store() -> Any:
+    """Lazy singleton — returns None if pgvector / embedder is unavailable."""
     global _ks
     if _ks is not None:
         return _ks
     try:
+        from agno_plus.adapters.agno.knowledge_store import KnowledgeStore
         if LLM_BACKEND == "openai":
             from agno.embedder.openai import OpenAIEmbedder
             embedder = OpenAIEmbedder(id=EMBED_MODEL, api_key=OPENAI_KEY)
