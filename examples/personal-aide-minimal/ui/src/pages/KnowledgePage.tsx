@@ -54,7 +54,7 @@ function AnnotatedTableEditor({
 export default function KnowledgePage({ apiBase }: Props) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [filesKey, setFilesKey] = useState(0);
-  const [uploadMode, setUploadMode] = useState<UploadMode>("structured");
+  const [uploadMode, setUploadMode] = useState<UploadMode>("semantic");
 
   const handleSuccess = (result: Record<string, unknown>) => {
     if (result.job_id) setActiveJobId(result.job_id as string);
@@ -83,24 +83,24 @@ export default function KnowledgePage({ apiBase }: Props) {
 
           {/* Mode toggle — only relevant for spreadsheets */}
           <div style={s.modeRow}>
-            <ModeBtn active={uploadMode === "structured"} onClick={() => setUploadMode("structured")}>
-              Structured
-            </ModeBtn>
             <ModeBtn active={uploadMode === "semantic"} onClick={() => setUploadMode("semantic")}>
               Semantic only
             </ModeBtn>
+            <ModeBtn active={uploadMode === "structured"} onClick={() => setUploadMode("structured")}>
+              Structured
+            </ModeBtn>
           </div>
           <p style={s.hint}>
-            {uploadMode === "structured"
-              ? "CSV / Excel files will be loaded into a SQL table you can annotate and query. A semantic index is also built for chat search."
-              : "All files (including spreadsheets) are chunked and embedded for semantic search only — no SQL table is created."}
+            {uploadMode === "semantic"
+              ? "All files are chunked and embedded for semantic chat search. No SQL table is created."
+              : "CSV / Excel files are loaded into a SQL table (queryable) and also embedded for semantic search. LLM auto-fills column descriptions after upload."}
           </p>
 
           <UploadWidget
             ingestUrl={`${apiBase}/ingest`}
             onSuccess={handleSuccess}
             extraFields={{ ingest_mode: uploadMode }}
-            accept={[".txt", ".md", ".pdf", ".csv", ".xlsx", ".xls", ".tsv"]}
+            accept={[".txt", ".md", ".pdf", ".csv", ".xlsx", ".xls", ".tsv", ".jpg", ".jpeg", ".png", ".webp"]}
           />
         </section>
 

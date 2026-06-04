@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import threading
 import uuid
@@ -29,9 +30,10 @@ import sqlalchemy as sa
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
+from starlette.requests import Request
 
 from agno_plus.core.storage import LocalStorageBackend
 from agno_plus.adapters.llm import call_llm
@@ -208,6 +210,34 @@ def _xlsx_to_dicts(content: bytes) -> tuple[list[str], list[dict]]:
     return headers, row_dicts
 
 
+def _infer_table_annotations(table_name: str, col_types: dict[str, str]) -> None:
+    """Run LLM to generate column descriptions; store in _annotations."""
+    col_names = list(col_types.keys())
+    sample = fetch_sample_rows(engine, table_name, limit=3)
+    sample_text = "\n".join(str(r) for r in sample)
+    prompt = (
+        f"Database table '{table_name}' columns: {', '.join(col_names)}\n"
+        f"Sample rows:\n{sample_text}\n\n"
+        "Write a short description (max 15 words) for each column. "
+        'Reply only with JSON: {"col_name": "description", ...}'
+    )
+    try:
+        raw = call_llm(prompt, backend=LLM_BACKEND, model=LLM_MODEL,
+                       api_key=OPENAI_KEY, base_url=OLLAMA_URL, json_response=True)
+        descs = json.loads(raw)
+    except Exception as exc:
+        print(f"[warn] schema inference failed for {table_name}: {exc}")
+        descs = {}
+
+    _annotations[table_name] = {
+        "description": "",
+        "columns": [
+            {"name": col, "type": col_types.get(col, "TEXT"), "description": descs.get(col, "")}
+            for col in col_names
+        ],
+    }
+
+
 def _ingest_structured(jid: str, file_id: str, content: bytes, filename: str) -> None:
     _set_step(jid, "read")
     ext = Path(filename).suffix.lower()
@@ -226,6 +256,9 @@ def _ingest_structured(jid: str, file_id: str, content: bytes, filename: str) ->
     col_types = infer_column_types(headers, row_dicts)
     create_dynamic_table(engine, table_name, headers, col_types)
     bulk_insert(engine, table_name, headers, row_dicts)
+
+    # Auto-infer descriptions via LLM so the schema editor is populated on first open
+    _infer_table_annotations(table_name, col_types)
 
     # Emit one semantic document so the chat endpoint can also answer table questions
     _set_step(jid, "embed")
@@ -247,6 +280,13 @@ def _ingest_structured(jid: str, file_id: str, content: bytes, filename: str) ->
             text("UPDATE aide_files SET chunks_count=:c, tables_created=:t WHERE id=:id"),
             {"c": chunks, "t": [table_name], "id": file_id},
         )
+    _finish_job(jid)
+
+
+def _ingest_image(jid: str, file_id: str) -> None:
+    """Images are stored as-is; no text extraction in the minimal demo."""
+    _set_step(jid, "read")
+    _set_step(jid, "upsert")
     _finish_job(jid)
 
 
@@ -286,6 +326,8 @@ def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type:
     try:
         if src_type == "structured":
             _ingest_structured(jid, file_id, content, filename)
+        elif src_type == "image":
+            _ingest_image(jid, file_id)
         else:
             _ingest_document(jid, file_id, content, filename)
     except Exception as exc:
@@ -298,8 +340,21 @@ def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type:
 
 app = FastAPI(title="Personal Aide — agno-plus minimal example")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+    """Ensure unhandled exceptions always carry CORS headers."""
+    return JSONResponse(
+        {"detail": str(exc)},
+        status_code=500,
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 @app.on_event("startup")
@@ -327,7 +382,10 @@ async def ingest(
     filename = file.filename or "upload"
     ext      = Path(filename).suffix.lower()
     is_spreadsheet = ext in (".csv", ".tsv", ".xlsx", ".xls")
-    if ingest_mode == "structured" and is_spreadsheet:
+    is_image       = ext in (".jpg", ".jpeg", ".png", ".webp", ".gif")
+    if is_image:
+        src_type = "image"
+    elif ingest_mode == "structured" and is_spreadsheet:
         src_type = "structured"
     elif ingest_mode == "semantic":
         src_type = "document"
@@ -528,7 +586,6 @@ async def infer_schema(domain_id: str) -> dict[str, Any]:
         try:
             raw = call_llm(prompt, backend=LLM_BACKEND, model=LLM_MODEL, api_key=OPENAI_KEY,
                            base_url=OLLAMA_URL, json_response=True)
-            import json
             descs = json.loads(raw)
         except Exception:
             descs = {}
@@ -585,13 +642,15 @@ async def chat(body: ChatRequest) -> dict[str, str]:
         reply = call_llm(prompt, backend=LLM_BACKEND, model=LLM_MODEL,
                          api_key=OPENAI_KEY, base_url=OLLAMA_URL, max_tokens=800)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
+        reply = f"Sorry, I could not reach the LLM: {exc}"
+    try:
         if gen:
             gen.end(output=reply)
         if trace:
             trace.update(output=reply)
         if _lf:
             _lf.flush()
+    except Exception:
+        pass
 
     return {"reply": reply}
