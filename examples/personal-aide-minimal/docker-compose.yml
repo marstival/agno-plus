@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: aide
+      POSTGRES_PASSWORD: aide
+      POSTGRES_DB: aide
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aide"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: python:3.12-slim
+    working_dir: /repo/examples/personal-aide-minimal
+    environment:
+      DATABASE_URL: postgresql://aide:aide@postgres:5432/aide
+      UPLOADS_DIR: /uploads
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../..:/repo                              # agno-plus source
+      - aide_uploads:/uploads
+    command: >
+      bash -c "
+        pip install -q -e /repo[agno,structured,llm] &&
+        pip install -q -r requirements.txt &&
+        uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  frontend:
+    image: node:20-slim
+    working_dir: /repo/examples/personal-aide-minimal/ui
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ../..:/repo
+      - ui_node_modules:/repo/examples/personal-aide-minimal/ui/node_modules
+    command: sh -c "npm install && npm run dev -- --host"
+
+volumes:
+  pgdata:
+  aide_uploads:
+  ui_node_modules:

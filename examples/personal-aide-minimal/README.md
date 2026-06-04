@@ -1,50 +1,99 @@
 # personal-aide-minimal
 
-End-to-end validation of the agno-plus stack: ingest a spreadsheet, store episodic memory, search, and chat — all without agentic-aide or any external service dependency.
+A complete, self-contained personal assistant built on **agno-plus** — showcasing how the library's modular components combine into a working application.
 
-## Two entry points
+## What you get
 
-### `agent.py` — CLI, no API key required
+| Feature | agno-plus component |
+|---|---|
+| File upload + background ingestion | `UploadWidget` + `JobStatusWidget` |
+| Ingested file list with delete/edit | `FileListBrowser` |
+| CSV/Excel → PostgreSQL table | `create_dynamic_table`, `bulk_insert`, `infer_column_types` |
+| Column annotation + LLM auto-fill | `TableSchemaEditor` + `call_llm()` |
+| Semantic search (pgvector RAG) | `KnowledgeStore` |
+| Raw file serving | `LocalStorageBackend` |
+| Chat with knowledge retrieval | `call_llm()` + `KnowledgeStore.search()` |
+| Observability (optional) | Langfuse v3 |
 
-Ingests a sample CSV, stores an episodic memory, runs a keyword search, and prints results.
+## Quick start (Docker Compose)
 
 ```bash
-# From the repo root
-pip install -e ".[agno]"
-python examples/personal-aide-minimal/agent.py
+# 1. Clone + configure
+cp .env.example .env
+#    → Edit .env and add your OPENAI_API_KEY
+
+# 2. Start everything (postgres + backend + frontend)
+docker compose up -d
+
+# 3. Open the app
+open http://localhost:5173
+
+# 4. (Optional) Add Langfuse observability
+docker compose -f docker-compose.yml -f docker-compose.langfuse.yml up -d
+#    → Langfuse UI at http://localhost:3001
+#       Email: admin@aide.local  Password: aide_admin_password
 ```
 
-### `app.py` — FastAPI server + React UI
+> **First run note:** The backend container installs agno-plus on startup (~60 s). Watch progress with `docker compose logs -f backend`.
 
-Full-stack demo: file upload, job polling, knowledge browser, RAG chat via OpenAI.
+## Quick start (local dev — faster iteration)
 
 ```bash
-pip install -r examples/personal-aide-minimal/requirements.txt
-pip install -e ".[agno]"
+# Terminal 1 — PostgreSQL only
+docker compose up -d postgres
 
-# Terminal 1 — backend
+# Terminal 2 — Backend
 cd examples/personal-aide-minimal
-OPENAI_API_KEY=sk-... PYTHONPATH=../.. uvicorn app:app --reload --port 8000
+cp .env.example .env            # add OPENAI_API_KEY
+pip install -e "../../[agno,structured,llm]"
+pip install -r requirements.txt
+uvicorn app:app --reload --port 8000
 
-# Terminal 2 — frontend
+# Terminal 3 — Frontend
 cd examples/personal-aide-minimal/ui
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Upload `sample_expense_report.csv` via the Ingest tab, then ask questions in Chat.
+## Ollama (local-only, no API key)
 
-## What it validates
+```
+LLM_BACKEND=ollama
+LLM_MODEL=llama3.2
+OLLAMA_URL=http://localhost:11434   # or http://host.docker.internal:11434 inside Docker
+EMBED_MODEL=nomic-embed-text        # ollama pull nomic-embed-text
+```
 
-| agno-plus component | Validated by |
-|---|---|
-| `SpreadsheetReader` | agent.py + app.py ingest |
-| `IngestionPipeline` (sync) | agent.py |
-| `BackgroundIngestionPipeline` (threaded) | app.py |
-| `TemporalGrounder` | agent.py PERSONAL grounding |
-| `EpisodicMemoryGrounder` | agent.py + app.py chat |
-| `UploadWidget` | ui/IngestPage.tsx |
-| `JobStatusWidget` | ui/IngestPage.tsx |
-| `KnowledgeBrowser` | ui/IngestPage.tsx |
+## Architecture
 
-`TemporalMergeChunking` and `DomainKnowledge` (Agno-specific adapters) are not exercised here — they require an Agno `Knowledge` + `PgVector` backend and are covered by `tests/adapters/`.
+```
+app.py                       ← single-file FastAPI backend
+│
+├── LocalStorageBackend      ← raw file → /uploads/{user}/{file_id}_{name}
+├── KnowledgeStore           ← pgvector chunks in ai.aide_knowledge_chunks
+│     └── search()           ← JSONB-filtered by user_id + domain_id
+├── create_dynamic_table()   ← CSV/Excel headers → sd_personal_{name} table
+├── bulk_insert()            ← row-by-row upsert with type coercion
+└── call_llm()               ← schema annotation + RAG prompt
+```
+
+```
+ui/src/
+├── App.tsx                  ← two-tab shell (Chat / Knowledge)
+├── pages/ChatPage.tsx       ← message thread + /chat endpoint
+└── pages/KnowledgePage.tsx  ← UploadWidget + FileListBrowser + TableSchemaEditor
+```
+
+## API surface
+
+```
+POST /ingest                → { job_id, file_id }
+GET  /jobs/{job_id}         → { state, current_step, completed_steps, error }
+GET  /files                 → { files: IngestedFile[] }
+DELETE /files/{id}          → { status: "deleted" }
+GET  /files/{id}/raw        → FileResponse
+GET  /ingest/structured/{domain}/{table}/sample  → { rows }
+PATCH /ingest/structured/{domain}/{table}/annotation
+POST /domains/{domain}/infer-schema → { schema_annotation }
+POST /chat                  → { reply }
+```

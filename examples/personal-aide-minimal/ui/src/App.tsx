@@ -1,11 +1,10 @@
 import React, { useState } from "react";
 import ChatPage from "./pages/ChatPage";
-import IngestPage from "./pages/IngestPage";
+import KnowledgePage from "./pages/KnowledgePage";
 
-export const API_BASE = "http://localhost:8000";
-export const USER_ID = "demo_user";
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
-type Tab = "chat" | "ingest";
+type Tab = "chat" | "knowledge";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("chat");
@@ -18,8 +17,8 @@ export default function App() {
           <TabBtn active={tab === "chat"} onClick={() => setTab("chat")}>
             Chat
           </TabBtn>
-          <TabBtn active={tab === "ingest"} onClick={() => setTab("ingest")}>
-            Ingest
+          <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")}>
+            Knowledge
           </TabBtn>
         </nav>
         <span style={s.tagline}>powered by agno-plus</span>
@@ -27,9 +26,9 @@ export default function App() {
 
       <main style={s.main}>
         {tab === "chat" ? (
-          <ChatPage apiBase={API_BASE} userId={USER_ID} />
+          <ChatPage apiBase={API_BASE} userId="local_user" />
         ) : (
-          <IngestPage apiBase={API_BASE} userId={USER_ID} />
+          <KnowledgePage apiBase={API_BASE} />
         )}
       </main>
     </div>
