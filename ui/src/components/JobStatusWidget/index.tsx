@@ -7,6 +7,7 @@
  *   pollIntervalMs how often to poll in ms (default 1500)
  *   onComplete     called when the job reaches "completed" state
  *   onFailed       called with the error string when the job fails
+ *   getHeaders     async function that returns auth headers for polling requests
  */
 
 import React, { useEffect, useRef, useState } from "react";
@@ -18,6 +19,7 @@ export interface JobStatusWidgetProps {
   pollIntervalMs?: number;
   onComplete?: () => void;
   onFailed?: (error: string) => void;
+  getHeaders?: () => Promise<Record<string, string>>;
 }
 
 const STEPS: JobStep[] = ["read", "ground", "chunk", "embed", "upsert"];
@@ -38,7 +40,6 @@ function stepStatus(step: JobStep, jobStatus: JobStatus): StepStatus {
     return jobStatus.state === "failed" ? "failed" : "active";
   }
   if (jobStatus.state === "failed") {
-    // Mark any step after the last completed as failed if that was the active one
     const steps = jobStatus.completed_steps;
     const lastCompleted = steps.length > 0 ? steps[steps.length - 1] : undefined;
     const lastIdx = lastCompleted ? STEPS.indexOf(lastCompleted) : -1;
@@ -54,6 +55,7 @@ export function JobStatusWidget({
   pollIntervalMs = 1500,
   onComplete,
   onFailed,
+  getHeaders,
 }: JobStatusWidgetProps) {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -66,7 +68,8 @@ export function JobStatusWidget({
     const poll = async () => {
       if (doneRef.current) return;
       try {
-        const res = await fetch(`${statusUrl}/${jobId}`);
+        const headers = getHeaders ? await getHeaders() : {};
+        const res = await fetch(`${statusUrl}/${jobId}`, { headers });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: JobStatus = await res.json();
         setStatus(data);
@@ -92,7 +95,7 @@ export function JobStatusWidget({
       doneRef.current = true;
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [jobId, statusUrl, pollIntervalMs, onComplete, onFailed]);
+  }, [jobId, statusUrl, pollIntervalMs, onComplete, onFailed, getHeaders]);
 
   if (fetchError) {
     return (
@@ -168,6 +171,7 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 12,
     padding: "20px 24px",
     background: "#fff",
+    marginTop: 12,
   },
   header: {
     display: "flex",

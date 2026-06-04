@@ -20,3 +20,36 @@ export interface MemoryRecord {
   metadata: Record<string, unknown>;
   event_at: string | null; // ISO datetime string
 }
+
+// ---------------------------------------------------------------------------
+// Ingested file types (structured + semantic)
+// ---------------------------------------------------------------------------
+
+export interface IngestedFile {
+  id: string;
+  filename: string;
+  source_type: string; // "text" | "spreadsheet" | "audio" | "image" | "structured"
+  chunks_count: number;
+  has_preview: boolean;
+  has_raw: boolean;
+  created_at: string; // ISO datetime string
+  tables_created: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Structured domain schema annotation types
+// ---------------------------------------------------------------------------
+
+export interface ColumnInfo {
+  description: string;
+  type?: string;   // PostgreSQL type: TEXT, BIGINT, NUMERIC, DATE, TIMESTAMPTZ, BOOLEAN
+  source?: string; // "context" when injected via LLM metadata extraction
+}
+
+export interface TableInfo {
+  description: string;
+  columns: Record<string, ColumnInfo>;
+  row_count: number;
+}
+
+export type SchemaAnnotation = Record<string, TableInfo>;

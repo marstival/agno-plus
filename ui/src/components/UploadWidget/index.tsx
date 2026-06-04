@@ -2,25 +2,30 @@
  * UploadWidget — file drop zone with type detection and upload progress.
  *
  * Props:
- *   ingestUrl      POST endpoint that accepts multipart/form-data and returns { job_id }
- *   onSuccess      called with the job_id when the server accepts the file
+ *   ingestUrl      POST endpoint that accepts multipart/form-data
+ *   onSuccess      called with the full server response on success
  *   onError        called with an error message on failure
  *   accept         file extensions to accept (default: all agno-plus supported types)
+ *   extraFields    additional FormData fields to include alongside the file
+ *   getHeaders     async function that returns auth headers for the request
  */
 
 import React, { useCallback, useRef, useState } from "react";
 
 export interface UploadWidgetProps {
   ingestUrl: string;
-  onSuccess: (jobId: string) => void;
+  onSuccess: (result: Record<string, unknown>) => void;
   onError?: (message: string) => void;
   accept?: string[];
+  extraFields?: Record<string, string>;
+  getHeaders?: () => Promise<Record<string, string>>;
 }
 
 const DEFAULT_ACCEPT = [
   ".xlsx", ".xls", ".xlsm", ".csv", ".tsv",
   ".mp3", ".m4a", ".wav", ".ogg", ".flac",
   ".jpg", ".jpeg", ".png", ".webp",
+  ".pdf", ".txt", ".md",
 ];
 
 const TYPE_LABELS: Record<string, string> = {
@@ -29,6 +34,7 @@ const TYPE_LABELS: Record<string, string> = {
   ".mp3": "Audio", ".m4a": "Audio", ".wav": "Audio",
   ".ogg": "Audio", ".flac": "Audio",
   ".jpg": "Image", ".jpeg": "Image", ".png": "Image", ".webp": "Image",
+  ".pdf": "PDF", ".txt": "Text", ".md": "Markdown",
 };
 
 function detectFileType(filename: string): string {
@@ -43,6 +49,8 @@ export function UploadWidget({
   onSuccess,
   onError,
   accept = DEFAULT_ACCEPT,
+  extraFields,
+  getHeaders,
 }: UploadWidgetProps) {
   const [state, setState] = useState<UploadState>("idle");
   const [dragging, setDragging] = useState(false);
@@ -59,16 +67,23 @@ export function UploadWidget({
       const form = new FormData();
       form.append("file", file);
       form.append("filename", file.name);
+      if (extraFields) {
+        for (const [k, v] of Object.entries(extraFields)) {
+          form.append(k, v);
+        }
+      }
+
+      const headers = getHeaders ? await getHeaders() : {};
 
       try {
-        const res = await fetch(ingestUrl, { method: "POST", body: form });
+        const res = await fetch(ingestUrl, { method: "POST", headers, body: form });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`Server error ${res.status}: ${text}`);
         }
-        const data: { job_id: string } = await res.json();
+        const data: Record<string, unknown> = await res.json();
         setState("done");
-        onSuccess(data.job_id);
+        onSuccess(data);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setState("error");
@@ -76,7 +91,7 @@ export function UploadWidget({
         onError?.(msg);
       }
     },
-    [ingestUrl, onSuccess, onError],
+    [ingestUrl, onSuccess, onError, extraFields, getHeaders],
   );
 
   const handleDrop = useCallback(
@@ -134,7 +149,7 @@ export function UploadWidget({
             {dragging ? "Drop file here" : "Drag & drop or click to upload"}
           </p>
           <p style={styles.secondaryText}>
-            Spreadsheets, audio, images
+            Spreadsheets, audio, images, PDFs, text
           </p>
           <p style={styles.accepted}>
             {accept.join("  ")}
@@ -155,7 +170,7 @@ export function UploadWidget({
         <div style={styles.status}>
           <span style={styles.successIcon}>✓</span>
           <p style={styles.primaryText}>
-            <strong>{fileName}</strong> ingested
+            <strong>{fileName}</strong> uploaded
           </p>
           <button style={styles.resetBtn} onClick={reset}>
             Upload another
