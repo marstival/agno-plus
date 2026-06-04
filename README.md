@@ -62,7 +62,7 @@ ui/
 | 8 | `adapters/langchain/` — LangChain loader wrappers | ✅ done |
 | 9 | `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser | ✅ done |
 
-Primary consumer: `agno-projects/agentic-aide` (personal assistant app). `DEFAULT_USER_ID` fallback (ADR-0009) is superseded there by Supabase Auth (Phase 11) — user identity is always resolved from JWT, never from a config default.
+Primary consumer: `agentic-aide` (personal assistant app). 
 
 ## Install
 

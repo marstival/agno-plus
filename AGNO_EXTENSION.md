@@ -521,11 +521,4 @@ storage.delete(key)
 
 Implement `StorageBackend` (a `runtime_checkable` Protocol) to add S3, GCS, or MinIO support without changing callers.
 
----
 
-## 13. Open Questions
-
-- [ ] Repo name: `agno-plus` is a working name — confirm or rename before creating the repo
-- [ ] Whether to contribute `SpreadsheetReader` (merged cell fix) upstream to Agno as a PR alongside keeping the extended version here
-- [ ] LangChain adapter priority — build after Agno adapter is validated, or defer entirely
-- [ ] Whether `KnowledgeBrowser` UI component needs pagination/filtering at MVP or search-only is sufficient

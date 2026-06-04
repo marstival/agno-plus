@@ -45,19 +45,7 @@ examples/
 tests/
 ```
 
-## Build order
 
-Steps in sequence — each has a natural test boundary before moving to the next:
-
-- [x] 1. `core/models.py` — `Document`, `Chunk`, `IngestionResult`, `MemoryRecord`, `JobStatus`
-- [x] 2. `core/time_grounding/` — `TemporalGrounder`, `GroundingMode`, `EpisodicMemoryGrounder`
-- [x] 3. `core/readers/spreadsheet.py` — 3-layer pipeline (port from reference codebase)
-- [x] 4. `core/pipeline/` — `IngestionWorker` protocol, job state machine, chunking
-- [x] 5. `adapters/agno/` — thin wrappers for readers + memory store
-- [x] 6. `examples/personal-aide-minimal/` — end-to-end: ingest a spreadsheet, ask a question
-- [x] 7. `core/readers/audio.py` and `core/readers/image.py` — STT and OCR
-- [x] 8. `adapters/langchain/` — LangChain loader wrappers
-- [x] 9. `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser
 
 ## Key design decisions already made
 
@@ -67,31 +55,7 @@ Steps in sequence — each has a natural test boundary before moving to the next
 - **GroundingMode.AUTO** uses sentence-level heuristic: first-person pronouns co-occurring with a relative time expression → normalize that sentence. No LLM call.
 - **Agno is the primary adapter target.** LangChain is secondary. The framework-agnostic core means either can be added without touching core logic.
 
-## Reference codebase
 
-The personal assistant that informed this design lives at:
-`/Users/stival/Projetos/personal-agentic-aide/`
-
-Relevant source files to port from:
-- `backend/app/services/spreadsheet/` — full 3-layer pipeline (Layer A/B/C)
-- `backend/app/services/time_grounding_service.py` — multilingual temporal grounding
-- `backend/app/core/constants.py` — spreadsheet thresholds and constants
-
-Do not modify the reference repo. Read from it, port to agno-plus.
-
-## Commands
-
-```bash
-# Install in editable mode (dev)
-pip install -e ".[dev,agno]"
-
-# Tests
-pytest -q
-
-# Lint / format
-ruff check agno_plus/
-ruff format agno_plus/
-```
 
 ## Conventions
 
