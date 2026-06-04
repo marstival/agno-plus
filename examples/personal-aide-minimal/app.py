@@ -99,10 +99,10 @@ def _build_knowledge_store() -> Any:
     try:
         from agno_plus.adapters.agno.knowledge_store import KnowledgeStore
         if LLM_BACKEND == "openai":
-            from agno.embedder.openai import OpenAIEmbedder
+            from agno.knowledge.embedder.openai import OpenAIEmbedder
             embedder = OpenAIEmbedder(id=EMBED_MODEL, api_key=OPENAI_KEY)
         else:
-            from agno.embedder.ollama import OllamaEmbedder
+            from agno.knowledge.embedder.ollama import OllamaEmbedder
             embedder = OllamaEmbedder(id="nomic-embed-text", host=OLLAMA_URL)
         _ks = KnowledgeStore(engine=engine, embedder=embedder, db_url=DATABASE_URL)
     except Exception as exc:
