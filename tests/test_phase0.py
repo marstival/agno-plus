@@ -196,3 +196,43 @@ class TestTemporalGrounderDb:
         event_at_topics = [t for t in stored.topics if t.startswith("event_at:")]
         assert len(event_at_topics) == 1
         assert event_at_topics[0] != "event_at:2020-01-01"
+
+    def test_inline_iso_date_populates_event_at(self) -> None:
+        """Memories already containing an ISO date (e.g. produced by
+        pre-grounding the user input — see ADR-0005) still get the topic."""
+        fake_db = _FakeDb()
+        wrapped = TemporalGrounderDb(db=fake_db)
+        mem = _FakeMemory("User bought groceries on 2026-06-04 for 45 EUR")
+        wrapped.upsert_user_memory(mem)
+        stored = fake_db.upserted[0]
+        assert "event_at:2026-06-04" in stored.topics
+
+    def test_inline_iso_first_match_wins(self) -> None:
+        fake_db = _FakeDb()
+        wrapped = TemporalGrounderDb(db=fake_db)
+        mem = _FakeMemory("Trip from 2026-06-01 to 2026-06-08 covered Lisbon and Porto")
+        wrapped.upsert_user_memory(mem)
+        stored = fake_db.upserted[0]
+        assert "event_at:2026-06-01" in stored.topics
+
+    def test_invalid_iso_date_rejected(self) -> None:
+        """Regex matches don't bypass datetime validation (no event_at for
+        impossible dates like 2024-13-45)."""
+        fake_db = _FakeDb()
+        wrapped = TemporalGrounderDb(db=fake_db)
+        mem = _FakeMemory("Reference 2024-13-45 mentioned in old logs")
+        wrapped.upsert_user_memory(mem)
+        stored = fake_db.upserted[0]
+        assert not any(t.startswith("event_at:") for t in (stored.topics or []))
+
+    def test_relative_grounding_beats_inline_iso(self) -> None:
+        """When the grounder rewrites a relative expression, its resolved date
+        wins over any pre-existing inline ISO date in the same text."""
+        fake_db = _FakeDb()
+        wrapped = TemporalGrounderDb(db=fake_db)
+        mem = _FakeMemory("Old note dated 2020-01-01: I met Bob yesterday")
+        wrapped.upsert_user_memory(mem)
+        stored = fake_db.upserted[0]
+        event_at_topics = [t for t in stored.topics if t.startswith("event_at:")]
+        assert len(event_at_topics) == 1
+        assert event_at_topics[0] != "event_at:2020-01-01"

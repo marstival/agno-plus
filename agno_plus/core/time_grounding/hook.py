@@ -15,19 +15,60 @@ The wrapper intercepts upsert_user_memory and upsert_memories, normalises
 relative time expressions in the memory text, and adds an "event_at:YYYY-MM-DD"
 topic so temporal queries can filter by when the event happened (not when it was
 stored). All other db methods are transparently delegated.
+
+Two paths can produce the topic:
+
+1. The grounder finds a relative expression ("yesterday", "last Monday")
+   and rewrites it inline. The first grounding's resolved_date becomes event_at.
+2. The text already contains an absolute ISO date (YYYY-MM-DD) — typically
+   because the caller pre-grounded the user input (see ADR-0005) and Agno's
+   MemoryManager paraphrased "2026-06-04 [yesterday]" into "2026-06-04". The
+   first valid inline date becomes event_at.
+
+(2) is the defence-in-depth path: it lets the topic stay populated even when
+the upstream paraphrase strips bracketed annotations.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from agno_plus.core.time_grounding.grounder import TemporalGrounder
 from agno_plus.core.time_grounding.models import GroundingMode
 
+_INLINE_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _first_inline_iso_date(text: str) -> datetime | None:
+    """Return the earliest valid YYYY-MM-DD in `text`, or None.
+
+    Validates via the datetime constructor so impossible dates like 2024-13-45
+    (matched by the regex) are rejected.
+    """
+    for m in _INLINE_ISO_DATE_RE.finditer(text):
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(year, month, day)
+        except ValueError:
+            continue
+    return None
+
+
+def _set_event_at_topic(memory: Any, event_date: datetime) -> None:
+    topic_tag = f"event_at:{event_date.strftime('%Y-%m-%d')}"
+    existing: list[str] = list(getattr(memory, "topics", None) or [])
+    existing = [t for t in existing if not t.startswith("event_at:")]
+    existing.append(topic_tag)
+    try:
+        memory.topics = existing
+    except AttributeError:
+        pass  # frozen dataclass — leave as-is
 
 
 def _ground_memory(memory: Any, grounder: TemporalGrounder) -> Any:
@@ -49,15 +90,11 @@ def _ground_memory(memory: Any, grounder: TemporalGrounder) -> Any:
         pass  # frozen dataclass — leave as-is
 
     if groundings:
-        event_date = groundings[0].resolved_date
-        topic_tag = f"event_at:{event_date.strftime('%Y-%m-%d')}"
-        existing: list[str] = list(getattr(memory, "topics", None) or [])
-        existing = [t for t in existing if not t.startswith("event_at:")]
-        existing.append(topic_tag)
-        try:
-            memory.topics = existing
-        except AttributeError:
-            pass
+        _set_event_at_topic(memory, groundings[0].resolved_date)
+    else:
+        inline = _first_inline_iso_date(grounded_text)
+        if inline is not None:
+            _set_event_at_topic(memory, inline)
 
     return memory
 
