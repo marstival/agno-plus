@@ -388,7 +388,24 @@ def _ingest_document(jid: str, file_id: str, content: bytes, filename: str) -> N
                     "metadata": doc.metadata,
                 })
         except Exception as exc:
-            print(f"[warn] IntelligentPdfReader failed ({exc}), falling back to plain decode")
+            print(f"[warn] IntelligentPdfReader failed ({exc}), trying pypdf fallback")
+
+    if not text_blocks and ext == ".pdf":
+        try:
+            import io as _io
+            import pypdf
+            pdf_reader = pypdf.PdfReader(_io.BytesIO(content))
+            for i, page in enumerate(pdf_reader.pages, 1):
+                page_text = (page.extract_text() or "").strip()
+                if page_text:
+                    text_blocks.append(page_text)
+                    preview_blocks.append({
+                        "block_type": "text",
+                        "content": page_text[:400],
+                        "metadata": {"page": i},
+                    })
+        except Exception as exc:
+            print(f"[warn] pypdf fallback failed ({exc})")
 
     if not text_blocks:
         text_body = content.decode("utf-8", errors="replace")
