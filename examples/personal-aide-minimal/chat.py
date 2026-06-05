@@ -7,6 +7,8 @@ Agno agent:
                                          (ADR-0009; in this demo USER_ID is a
                                          constant, in a real app it comes from
                                          the request)
+  - SQLTools + custom list/describe   → run_sql_query over user's structured
+                                         tables (ADR-0016, G-0003)
   - db=TemporalGrounderDb(PostgresDb)  → defence-in-depth grounding hook on
                                          memory upserts (ADR-0005)
   - pre-grounding of the user message  → deterministic calendar grounding
@@ -16,8 +18,9 @@ Agno agent:
   - add_history_to_context             → native session history, no custom
                                          table
 
-Langfuse tracing is optional; when configured, a single trace is opened per
-chat turn and the agent's run is attached as a generation span.
+Observability is handled by Agno's OpenInference OTel instrumentation
+configured at startup (see tracing.py) — tool calls and model invocations
+flow into Langfuse without any code in this file.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from datetime import datetime, timezone
 
 from agno_plus.core.time_grounding.models import GroundingMode
 
-from bootstrap import USER_ID, agent, grounder, langfuse
+from bootstrap import USER_ID, agent, grounder
 
 
 def _pre_ground(message: str) -> str:
@@ -46,19 +49,8 @@ def _pre_ground(message: str) -> str:
 
 def reply(message: str) -> str:
     grounded = _pre_ground(message)
-    lf = langfuse()
-    trace = lf.trace(name="chat", input=message) if lf else None
-    gen = trace.generation(name="agent", input=grounded) if trace else None
     try:
         response = agent().run(grounded, user_id=USER_ID)
-        output = getattr(response, "content", str(response))
+        return getattr(response, "content", str(response))
     except Exception as exc:
-        output = f"Sorry, the agent failed: {exc}"
-    finally:
-        if gen:
-            gen.end(output=output)
-        if trace:
-            trace.update(output=output)
-        if lf:
-            lf.flush()
-    return output
+        return f"Sorry, the agent failed: {exc}"

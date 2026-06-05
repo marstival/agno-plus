@@ -37,6 +37,7 @@ import chat
 import db
 import ingestion
 import jobs
+import tracing
 from bootstrap import DOMAIN_ID, USER_ID, engine, knowledge_store, storage
 from config import settings
 from ingestion import annotations
@@ -57,7 +58,7 @@ async def _cors_safe_error(request: Request, exc: Exception) -> JSONResponse:
 @app.on_event("startup")
 def _startup() -> None:
     db.init_schema()
-    bootstrap.langfuse()  # warm-up (prints "[langfuse] tracing to ...")
+    tracing.setup()  # Agno OTel → Langfuse OTLP (auto-instruments tool calls)
 
 
 @app.get("/health")

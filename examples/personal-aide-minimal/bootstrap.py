@@ -139,26 +139,6 @@ def _build_agent(store: KnowledgeStore, grounder: TemporalGrounder) -> Any:
     )
 
 
-def _build_langfuse() -> Any | None:
-    if not (settings.langfuse_host and settings.langfuse_public_key and settings.langfuse_secret_key):
-        return None
-    try:
-        from langfuse import Langfuse
-    except ImportError:
-        print("[warn] langfuse package not installed; tracing disabled")
-        return None
-    client = Langfuse(
-        public_key=settings.langfuse_public_key,
-        secret_key=settings.langfuse_secret_key,
-        host=settings.langfuse_host,
-    )
-    if not callable(getattr(client, "trace", None)):
-        print("[warn] langfuse SDK >=3 detected; pin langfuse<3 — tracing disabled")
-        return None
-    print(f"[langfuse] tracing to {settings.langfuse_host}")
-    return client
-
-
 # ---------------------------------------------------------------------------
 # Singletons (built lazily on first access to avoid import-time DB connects)
 # ---------------------------------------------------------------------------
@@ -171,7 +151,6 @@ _grounder: TemporalGrounder | None = None
 _store: KnowledgeStore | None = None
 _pipeline: IngestionPipeline | None = None
 _agent: Any = None
-_langfuse: Any = None
 
 
 def engine() -> Any:
@@ -237,13 +216,6 @@ def agent() -> Any:
     return _agent
 
 
-def langfuse() -> Any | None:
-    global _langfuse
-    if _langfuse is None:
-        _langfuse = _build_langfuse()
-    return _langfuse
-
-
 __all__ = [
     "DOMAIN_ID",
     "USER_ID",
@@ -251,7 +223,6 @@ __all__ = [
     "engine",
     "grounder",
     "knowledge_store",
-    "langfuse",
     "pipeline",
     "sql_engine",
     "storage",
