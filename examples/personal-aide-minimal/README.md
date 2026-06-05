@@ -19,6 +19,7 @@ local Postgres + pgvector.
 | `TemporalGrounderDb` (Agno DB wrapper)                | `bootstrap._build_agent` | 0005 |
 | `DomainKnowledge` (KnowledgeProtocol + user closure)  | `bootstrap._build_agent` | 0009 |
 | `KnowledgeStore` (PgVector, domain/user scoping)      | `bootstrap.knowledge_store` | 0010 |
+| Agno `SQLTools` + custom annotation-aware `list_my_sql_tables` / `describe_table` | `sql.py`, `bootstrap._build_agent` | G-0003, agentic-aide ADR-0016 |
 | `TemporalMergeChunking` (used inside KnowledgeStore)  | implicit                | 0011 |
 | `LocalStorageBackend`                                 | `bootstrap.storage`     | 0014 |
 | Structured DDL helpers (`create_dynamic_table`, …)    | `ingestion.run_structured` | 0012 |
@@ -38,6 +39,7 @@ bootstrap.py     singleton wiring (engine, storage, grounder, store, pipeline, a
 db.py            schema setup for the aide_files registry
 jobs.py          in-memory job tracker mirroring agno-plus JobStatus
 ingestion.py     run_semantic / run_structured / run_image  ← the agno-plus showcase
+sql.py           list_my_sql_tables + describe_table  (annotation-aware, G-0003)
 chat.py          Agno Agent + DomainKnowledge + optional Langfuse trace
 app.py           FastAPI shell + route handlers (no business logic)
 agent.py         standalone CLI demo of IngestionPipeline + EpisodicMemoryGrounder
@@ -119,8 +121,9 @@ same agno-plus library:
   `USER_ID = "local_user"`.
 - DB-persisted job state for restart durability (G-0002). This example
   keeps jobs in memory.
-- The `aide_readonly` Postgres role + statement timeout for SQL hardening
-  (G-0003). This example does not expose SQL to the agent.
+- The `aide_readonly` Postgres role for SQL hardening (G-0003). This
+  example wires the 5-second statement timeout (cheap, demonstrates the
+  pattern) but skips the role — single-user demo, no role separation.
 
 See `agno-plus/docs/boundary-analysis.md` for the full agno-plus vs
 application-layer breakdown.
