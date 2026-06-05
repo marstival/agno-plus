@@ -220,7 +220,11 @@ class KnowledgeStore:
                         "domain_id": domain_id,
                         "user_id": user_id,
                         "filename": filename,
-                        **{k: v for k, v in (doc.metadata or {}).items()
+                        **{k: v for k, v in (
+                               getattr(doc, "metadata", None)
+                               or getattr(doc, "meta_data", None)
+                               or {}
+                           ).items()
                            if k not in ("domain_id", "user_id", "filename")},
                     },
                 )

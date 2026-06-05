@@ -1,0 +1,18 @@
+<clickhouse>
+    <macros>
+        <shard>01</shard>
+        <replica>01</replica>
+    </macros>
+    <remote_servers>
+        <default>
+            <shard>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                    <user>langfuse</user>
+                    <password>langfuse</password>
+                </replica>
+            </shard>
+        </default>
+    </remote_servers>
+</clickhouse>
