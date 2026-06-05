@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-interface Message {
+export interface Message {
   role: "user" | "assistant";
   content: string;
   pending?: boolean;
@@ -9,16 +9,17 @@ interface Message {
 interface Props {
   apiBase: string;
   userId: string;
+  messages: Message[];
+  setMessages: (updater: (prev: Message[]) => Message[]) => void;
 }
 
-const WELCOME: Message = {
+export const WELCOME: Message = {
   role: "assistant",
   content:
-    "Hi! I'm your personal aide. Switch to the Ingest tab to upload spreadsheets into my memory, then come back here and ask me anything about them.",
+    "Hi! I'm your personal aide. Switch to the Knowledge tab to upload files, then come back here and ask me anything about them.",
 };
 
-export default function ChatPage({ apiBase, userId }: Props) {
-  const [messages, setMessages] = useState<Message[]>([WELCOME]);
+export default function ChatPage({ apiBase, userId, messages, setMessages }: Props) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -51,13 +52,13 @@ export default function ChatPage({ apiBase, userId }: Props) {
         : `Error: ${data.detail ?? "Unknown error"}`;
       setMessages((prev) => [
         ...prev.slice(0, -1),
-        { role: "assistant", content: reply },
+        { role: "assistant" as const, content: reply },
       ]);
     } catch (err) {
       setMessages((prev) => [
         ...prev.slice(0, -1),
         {
-          role: "assistant",
+          role: "assistant" as const,
           content: `Network error: ${err instanceof Error ? err.message : String(err)}`,
         },
       ]);

@@ -3,6 +3,7 @@ import {
   FileListBrowser,
   IngestedFile,
   JobStatusWidget,
+  JsonPreviewModal,
   TableInfo,
   TableSchemaEditor,
   UploadWidget,
@@ -55,6 +56,7 @@ export default function KnowledgePage({ apiBase }: Props) {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [filesKey, setFilesKey] = useState(0);
   const [uploadMode, setUploadMode] = useState<UploadMode>("semantic");
+  const [preview, setPreview] = useState<{ title: string; data: unknown } | null>(null);
 
   const handleSuccess = (result: Record<string, unknown>) => {
     if (result.job_id) setActiveJobId(result.job_id as string);
@@ -74,8 +76,25 @@ export default function KnowledgePage({ apiBase }: Props) {
     window.open(`${apiBase}/files/${_fileId}/raw`, "_blank");
   };
 
+  const handlePreviewFile = async (fileId: string, filename: string) => {
+    try {
+      const res = await fetch(`${apiBase}/files/${fileId}/preview`);
+      const data = await res.json();
+      setPreview({ title: `Extraction Preview — ${filename}`, data: data.payload });
+    } catch {
+      setPreview({ title: `Preview — ${filename}`, data: { error: "Failed to load preview" } });
+    }
+  };
+
   return (
     <div style={s.page}>
+      {preview && (
+        <JsonPreviewModal
+          title={preview.title}
+          data={preview.data}
+          onClose={() => setPreview(null)}
+        />
+      )}
       {/* Upload + status row */}
       <div style={s.topRow}>
         <section style={s.card}>
@@ -126,6 +145,7 @@ export default function KnowledgePage({ apiBase }: Props) {
           domainId="personal"
           onDeleteFile={handleDeleteFile}
           onDownloadFile={handleDownloadFile}
+          onPreviewFile={handlePreviewFile}
           renderExpandedRow={(file: IngestedFile) => {
             const tableName = file.tables_created?.[0];
             if (!tableName) return null;

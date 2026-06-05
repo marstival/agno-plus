@@ -52,13 +52,14 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://aide:aide@localhost:5432/aide")
-LLM_BACKEND  = os.getenv("LLM_BACKEND", "openai")
-LLM_MODEL    = os.getenv("LLM_MODEL", "gpt-4o-mini")
-EMBED_MODEL  = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-OPENAI_KEY   = os.getenv("OPENAI_API_KEY", "")
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
-UPLOADS_DIR  = Path(os.getenv("UPLOADS_DIR", "./uploads"))
+DATABASE_URL  = os.getenv("DATABASE_URL", "postgresql://aide:aide@localhost:5432/aide")
+LLM_BACKEND   = os.getenv("LLM_BACKEND", "openai")
+LLM_MODEL     = os.getenv("LLM_MODEL", "gpt-4o-mini")
+EMBED_MODEL   = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+OPENAI_KEY    = os.getenv("OPENAI_API_KEY", "")
+OLLAMA_URL    = os.getenv("OLLAMA_URL", "http://localhost:11434")
+UPLOADS_DIR   = Path(os.getenv("UPLOADS_DIR", "./uploads"))
+VISION_MODEL  = os.getenv("VISION_MODEL", "gpt-4o" if os.getenv("LLM_BACKEND", "openai") == "openai" else "llava")
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Single fixed user + domain for the minimal (no-auth) demo
@@ -80,15 +81,19 @@ def _init_db() -> None:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS ai"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS aide_files (
-                id              TEXT PRIMARY KEY,
-                filename        TEXT NOT NULL,
-                source_type     TEXT NOT NULL,
-                chunks_count    INT  DEFAULT 0,
-                storage_key     TEXT,
-                tables_created  TEXT[],
-                created_at      TIMESTAMPTZ DEFAULT now()
+                id                  TEXT PRIMARY KEY,
+                filename            TEXT NOT NULL,
+                source_type         TEXT NOT NULL,
+                chunks_count        INT  DEFAULT 0,
+                storage_key         TEXT,
+                tables_created      TEXT[],
+                extraction_preview  JSONB,
+                created_at          TIMESTAMPTZ DEFAULT now()
             )
         """))
+        conn.execute(text(
+            "ALTER TABLE aide_files ADD COLUMN IF NOT EXISTS extraction_preview JSONB"
+        ))
 
 
 def _build_knowledge_store() -> Any:
@@ -281,32 +286,124 @@ def _ingest_structured(jid: str, file_id: str, content: bytes, filename: str) ->
             domain_id=DOMAIN_ID, user_id=USER_ID, filename=filename,
         )
 
+    preview = {
+        "source_type": "structured",
+        "filename": filename,
+        "table_name": table_name,
+        "columns": {col: {"type": col_types.get(col, "TEXT"), "description": ""} for col in headers},
+        "row_count": len(row_dicts),
+        "sample_rows": row_dicts[:5],
+    }
+
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE aide_files SET chunks_count=:c, tables_created=:t WHERE id=:id"),
-            {"c": chunks, "t": [table_name], "id": file_id},
+            text("UPDATE aide_files SET chunks_count=:c, tables_created=:t, extraction_preview=cast(:p as jsonb) WHERE id=:id"),
+            {"c": chunks, "t": [table_name], "p": json.dumps(preview), "id": file_id},
         )
     _finish_job(jid)
 
 
-def _ingest_image(jid: str, file_id: str) -> None:
-    """Images are stored as-is; no text extraction in the minimal demo."""
+def _ingest_image(jid: str, file_id: str, content: bytes, filename: str) -> None:
+    """3-layer image ingestion: OCR → entity extraction → semantic embedding."""
     _set_step(jid, "read")
+
+    # Layer 1: OCR via vision LLM
+    ocr_text = ""
+    try:
+        from agno_plus.core.readers.image import ImageReader
+        reader = ImageReader(
+            backend=LLM_BACKEND,
+            model=VISION_MODEL,
+            api_key=OPENAI_KEY or None,
+            ollama_base_url=OLLAMA_URL,
+        )
+        docs = reader.read(content, filename)
+        ocr_text = docs[0].content if docs else ""
+    except Exception as exc:
+        print(f"[warn] ImageReader OCR failed ({exc}); image stored without text")
+
+    # Layer 2: key-value entity extraction from OCR text
+    entities: dict = {}
+    if ocr_text:
+        try:
+            prompt = (
+                f"Given this OCR text extracted from an image:\n{ocr_text[:2000]}\n\n"
+                "Extract key facts as key-value pairs (dates, amounts, names, IDs, etc.). "
+                'Reply only with JSON: {"key": "value", ...}'
+            )
+            raw = call_llm(prompt, backend=LLM_BACKEND, model=LLM_MODEL,
+                           api_key=OPENAI_KEY, base_url=OLLAMA_URL, json_response=True)
+            entities = json.loads(raw)
+        except Exception as exc:
+            print(f"[warn] Entity extraction failed: {exc}")
+
+    preview = {
+        "source_type": "image",
+        "filename": filename,
+        "layer1_ocr": ocr_text,
+        "layer2_entities": entities,
+        "layer3_chunks": 0,
+    }
+
+    # Layer 3: semantic embedding
+    _set_step(jid, "embed")
+    count = 0
+    if ocr_text:
+        ks = _build_knowledge_store()
+        if ks:
+            from agno.knowledge.document.base import Document as AgnoDoc
+            count = ks.ingest_documents(
+                [AgnoDoc(content=ocr_text, name=filename, meta_data={"file_id": file_id})],
+                domain_id=DOMAIN_ID, user_id=USER_ID, filename=filename,
+            )
+
+    preview["layer3_chunks"] = count
+
     _set_step(jid, "upsert")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE aide_files SET chunks_count=:c, extraction_preview=cast(:p as jsonb) WHERE id=:id"),
+            {"c": count, "p": json.dumps(preview), "id": file_id},
+        )
     _finish_job(jid)
 
 
 def _ingest_document(jid: str, file_id: str, content: bytes, filename: str) -> None:
     _set_step(jid, "read")
-    text_body = content.decode("utf-8", errors="replace")
+    ext = Path(filename).suffix.lower()
+
+    # Use IntelligentPdfReader for PDFs to get layout-aware block extraction
+    preview_blocks: list[dict] = []
+    text_blocks: list[str] = []
+    if ext == ".pdf":
+        try:
+            from agno_plus.core.readers.pdf import IntelligentPdfReader
+            reader = IntelligentPdfReader()
+            pdf_docs = reader.read(content, filename)
+            for doc in pdf_docs:
+                text_blocks.append(doc.content)
+                preview_blocks.append({
+                    "block_type": getattr(doc, "source_type", "text"),
+                    "content": doc.content[:400],
+                    "metadata": doc.metadata,
+                })
+        except Exception as exc:
+            print(f"[warn] IntelligentPdfReader failed ({exc}), falling back to plain decode")
+
+    if not text_blocks:
+        text_body = content.decode("utf-8", errors="replace")
+        text_blocks = [text_body]
+        preview_blocks = [{"block_type": "text", "content": text_body[:400], "metadata": {}}]
 
     _set_step(jid, "chunk")
     chunk_size, overlap = 800, 160
-    chunks = [
-        text_body[i : i + chunk_size].strip()
-        for i in range(0, max(1, len(text_body)), chunk_size - overlap)
-        if text_body[i : i + chunk_size].strip()
-    ]
+    all_chunks = []
+    for body in text_blocks:
+        all_chunks.extend(
+            body[i: i + chunk_size].strip()
+            for i in range(0, max(1, len(body)), chunk_size - overlap)
+            if body[i: i + chunk_size].strip()
+        )
 
     _set_step(jid, "embed")
     ks = _build_knowledge_store()
@@ -315,15 +412,17 @@ def _ingest_document(jid: str, file_id: str, content: bytes, filename: str) -> N
         from agno.knowledge.document.base import Document as AgnoDoc
         docs = [
             AgnoDoc(content=chunk, name=filename, meta_data={"file_id": file_id, "chunk_idx": i})
-            for i, chunk in enumerate(chunks)
+            for i, chunk in enumerate(all_chunks)
         ]
         count = ks.ingest_documents(docs, domain_id=DOMAIN_ID, user_id=USER_ID, filename=filename)
+
+    preview = {"source_type": ext.lstrip("."), "filename": filename, "blocks": preview_blocks, "chunks": count}
 
     _set_step(jid, "upsert")
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE aide_files SET chunks_count=:c WHERE id=:id"),
-            {"c": count, "id": file_id},
+            text("UPDATE aide_files SET chunks_count=:c, extraction_preview=cast(:p as jsonb) WHERE id=:id"),
+            {"c": count, "p": json.dumps(preview), "id": file_id},
         )
     _finish_job(jid)
 
@@ -333,7 +432,7 @@ def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type:
         if src_type == "structured":
             _ingest_structured(jid, file_id, content, filename)
         elif src_type == "image":
-            _ingest_image(jid, file_id)
+            _ingest_image(jid, file_id, content, filename)
         else:
             _ingest_document(jid, file_id, content, filename)
     except Exception as exc:
@@ -429,7 +528,7 @@ def job_status(job_id: str) -> dict[str, Any]:
 def list_files() -> dict[str, Any]:
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT id, filename, source_type, chunks_count, tables_created, created_at FROM aide_files ORDER BY created_at DESC")
+            text("SELECT id, filename, source_type, chunks_count, tables_created, extraction_preview, created_at FROM aide_files ORDER BY created_at DESC")
         ).fetchall()
     return {
         "files": [
@@ -440,11 +539,29 @@ def list_files() -> dict[str, Any]:
                 "chunks_count": r.chunks_count or 0,
                 "tables_created": r.tables_created or [],
                 "created_at": r.created_at.isoformat() if r.created_at else "",
-                "has_preview": (r.chunks_count or 0) > 0,
+                "has_preview": r.extraction_preview is not None,
                 "has_raw": True,
             }
             for r in rows
         ]
+    }
+
+
+@app.get("/files/{file_id}/preview")
+def file_preview(file_id: str) -> dict[str, Any]:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT filename, source_type, extraction_preview FROM aide_files WHERE id=:id"),
+            {"id": file_id},
+        ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {
+        "file_id": file_id,
+        "filename": row.filename,
+        "source_type": row.source_type,
+        "available": row.extraction_preview is not None,
+        "payload": row.extraction_preview,
     }
 
 

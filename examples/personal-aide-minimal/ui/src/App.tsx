@@ -1,13 +1,23 @@
 import React, { useState } from "react";
-import ChatPage from "./pages/ChatPage";
+import ChatPage, { Message, WELCOME } from "./pages/ChatPage";
 import KnowledgePage from "./pages/KnowledgePage";
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 type Tab = "chat" | "knowledge";
 
+const MAX_MESSAGES = 100;
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("chat");
+  const [messages, setMessages] = useState<Message[]>([WELCOME]);
+
+  const addMessages = (updater: (prev: Message[]) => Message[]) => {
+    setMessages(prev => {
+      const next = updater(prev);
+      return next.length > MAX_MESSAGES ? next.slice(-MAX_MESSAGES) : next;
+    });
+  };
 
   return (
     <div style={s.root}>
@@ -26,7 +36,12 @@ export default function App() {
 
       <main style={s.main}>
         {tab === "chat" ? (
-          <ChatPage apiBase={API_BASE} userId="local_user" />
+          <ChatPage
+            apiBase={API_BASE}
+            userId="local_user"
+            messages={messages}
+            setMessages={addMessages}
+          />
         ) : (
           <KnowledgePage apiBase={API_BASE} />
         )}
