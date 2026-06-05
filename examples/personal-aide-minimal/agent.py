@@ -1,38 +1,40 @@
-"""Minimal end-to-end example: ingest a spreadsheet, search episodic memory.
+"""Standalone CLI demo of the agno-plus core ingestion pipeline.
 
-Run from the repo root:
+This file is intentionally independent of the FastAPI app — it runs with a
+toy `InMemoryStore` so you can see the pipeline + temporal grounding in
+action with no database, no LLM key, and no Docker.
+
+Run from the agno-plus repo root:
+
     python examples/personal-aide-minimal/agent.py
 
-Requires only the core extras (no LLM API key needed):
-    pip install agno-plus[agno]
+For the full assistant (Agno Agent + RAG + memory + tracing) use the
+FastAPI app:
+
+    docker compose up -d
+    open http://localhost:5173
 """
 
 from __future__ import annotations
 
-import io
-import os
 import csv
+import io
+import uuid
 
+from agno_plus.core.models import MemoryRecord
 from agno_plus.core.pipeline.worker import IngestionPipeline
 from agno_plus.core.readers.spreadsheet import SpreadsheetReader
-from agno_plus.core.time_grounding.grounder import TemporalGrounder
 from agno_plus.core.time_grounding.episodic import EpisodicMemoryGrounder
-from agno_plus.core.models import MemoryRecord
-
-
-# ---------------------------------------------------------------------------
-# Minimal in-memory MemoryStore for demonstration (no vector DB needed)
-# ---------------------------------------------------------------------------
+from agno_plus.core.time_grounding.grounder import TemporalGrounder
 
 
 class InMemoryStore:
-    """Toy store — holds records in a list; search is keyword-only."""
+    """Toy MemoryStore — keyword search over a Python list."""
 
     def __init__(self) -> None:
         self.records: list[MemoryRecord] = []
 
     def upsert(self, content: str, metadata: dict) -> MemoryRecord:
-        import uuid
         record = MemoryRecord(
             id=f"r_{uuid.uuid4().hex[:6]}",
             content=content,
@@ -41,20 +43,15 @@ class InMemoryStore:
         self.records.append(record)
         return record
 
-    def search(self, query: str, user_id: str, **kwargs) -> list[MemoryRecord]:
-        query_lower = query.lower()
-        return [r for r in self.records if query_lower in r.content.lower()]
+    def search(self, query: str, user_id: str, **_: object) -> list[MemoryRecord]:
+        q = query.lower()
+        return [r for r in self.records if q in r.content.lower()]
 
     def delete(self, record_id: str) -> None:
         self.records = [r for r in self.records if r.id != record_id]
 
 
-# ---------------------------------------------------------------------------
-# Build a sample spreadsheet in memory
-# ---------------------------------------------------------------------------
-
-
-def make_sample_spreadsheet() -> bytes:
+def _sample_csv() -> bytes:
     rows = [
         ["Date", "Category", "Description", "Amount"],
         ["2026-05-01", "Food", "Supermarket", "120.50"],
@@ -68,44 +65,36 @@ def make_sample_spreadsheet() -> bytes:
     return buf.getvalue().encode()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     store = InMemoryStore()
     grounder = TemporalGrounder()
-
     pipeline = IngestionPipeline(
         readers={".csv": SpreadsheetReader()},
         memory_store=store,
         grounder=grounder,
     )
 
-    print("Ingesting sample expenses spreadsheet...")
-    spreadsheet_bytes = make_sample_spreadsheet()
-    job_id = pipeline.submit(spreadsheet_bytes, "expenses.csv", {"grounding_mode": "document"})
+    print("\n== Ingestion pipeline (ADR-0007) ==")
+    job_id = pipeline.submit(_sample_csv(), "expenses.csv", {"grounding_mode": "document"})
     status = pipeline.status(job_id)
-    print(f"  Job {job_id}: {status.state.value}")
-    print(f"  Completed steps: {[s.value for s in status.completed_steps]}")
-    print(f"  Records in store: {len(store.records)}")
-    print()
+    print(f"  job        : {job_id}")
+    print(f"  state      : {status.state.value}")
+    print(f"  steps      : {[s.value for s in status.completed_steps]}")
+    print(f"  chunks     : {status.chunks_count}")
+    print(f"  records    : {len(store.records)}")
 
-    # Simulate episodic memory (chat message about an expense)
+    print("\n== Episodic memory grounding (ADR-0005) ==")
     episodic = EpisodicMemoryGrounder(store=store, grounder=grounder)
     episodic.store("I spent a lot at the supermarket yesterday", user_id="user1")
-    print("Stored episodic memory (grounded):")
-    for r in store.records[-1:]:
-        print(f"  content: {r.content!r}")
-        print(f"  event_at: {r.metadata.get('event_at')}")
-    print()
+    grounded = store.records[-1]
+    print(f"  content    : {grounded.content!r}")
+    print(f"  event_at   : {grounded.metadata.get('event_at')}")
 
-    # Simple keyword search
+    print("\n== Keyword search ==")
     results = store.search("food", user_id="user1")
-    print(f"Search 'food' → {len(results)} result(s):")
+    print(f"  matches    : {len(results)}")
     for r in results[:3]:
-        print(f"  {r.content[:80]!r}")
+        print(f"    - {r.content[:80]}")
 
 
 if __name__ == "__main__":

@@ -33,3 +33,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Example runtime data
+examples/personal-aide-minimal/uploads/
