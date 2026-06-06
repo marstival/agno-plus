@@ -115,8 +115,8 @@ class IngestionPipeline:
 
             # Step 3: Chunk
             status.current_step = JobStep.CHUNK
-            chunks_text = self._step_chunk(documents)
-            status.chunks_count = len(chunks_text)
+            chunks = self._step_chunk(documents)
+            status.chunks_count = len(chunks)
             status.completed_steps.append(JobStep.CHUNK)
 
             # Step 4–5: Embed + Upsert (delegated to MemoryStore)
@@ -124,10 +124,10 @@ class IngestionPipeline:
             status.completed_steps.append(JobStep.EMBED)
 
             status.current_step = JobStep.UPSERT
-            for chunk_content in chunks_text:
+            for chunk_content, doc_meta in chunks:
                 self._store.upsert(
                     content=chunk_content,
-                    metadata={**meta, "filename": filename},
+                    metadata={**meta, "filename": filename, **doc_meta},
                 )
             status.completed_steps.append(JobStep.UPSERT)
 
@@ -164,10 +164,17 @@ class IngestionPipeline:
                 doc.metadata["event_at"] = groundings[0].resolved_date
         return documents
 
-    def _step_chunk(self, documents: list[Document]) -> list[str]:
-        chunks: list[str] = []
+    def _step_chunk(self, documents: list[Document]) -> list[tuple[str, dict[str, Any]]]:
+        """Return (chunk_content, source_doc_metadata) pairs.
+
+        Each chunk carries its source Document's metadata so the UPSERT step
+        can propagate per-block fields (page_number, block_type, headings,
+        table_label, …) into the vector store. Without this, retrieval results
+        lose every signal the reader produced and citations are impossible.
+        """
+        chunks: list[tuple[str, dict[str, Any]]] = []
         for doc in documents:
-            chunks.extend(
+            strs = (
                 chunk_text_structured(
                     doc.content,
                     max_tokens=self._max_tokens,
@@ -175,4 +182,7 @@ class IngestionPipeline:
                 )
                 or [doc.content]  # never produce empty output for non-empty doc
             )
+            doc_meta = dict(doc.metadata)
+            for s in strs:
+                chunks.append((s, doc_meta))
         return chunks

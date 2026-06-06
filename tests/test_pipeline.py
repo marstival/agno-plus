@@ -204,6 +204,31 @@ def test_pipeline_upserts_to_store():
         assert meta.get("filename") == "test.csv"
 
 
+def test_pipeline_propagates_source_document_metadata():
+    """Per-Document metadata produced by the reader (block_type, page_number,
+    headings, …) must reach every chunk upserted into the store. Without this
+    propagation, retrieval results have no way to cite their source."""
+    store = FakeMemoryStore()
+    pipeline = make_pipeline(store)
+    data = make_csv_bytes([
+        ["Date", "Item"],
+        ["2026-05-01", "A"],
+        ["2026-05-02", "B"],
+    ])
+    pipeline.submit(data, "items.csv", {"user_id": "u1"})
+    assert len(store.records) >= 1
+    # SpreadsheetReader sets source_type and block-level fields in Document.metadata;
+    # the pipeline must merge them into the upserted chunk metadata.
+    for _, meta in store.records:
+        # submit-time fields preserved
+        assert meta["user_id"] == "u1"
+        assert meta["filename"] == "items.csv"
+        # reader-emitted fields propagated
+        assert "block_type" in meta or "sheet_name" in meta, (
+            f"reader metadata did not reach chunk: {meta}"
+        )
+
+
 def test_pipeline_unknown_extension_fails():
     store = FakeMemoryStore()
     pipeline = make_pipeline(store)
