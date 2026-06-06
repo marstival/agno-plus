@@ -7,8 +7,13 @@ import csv
 
 import pytest
 
-from agno_plus.core.models import JobState, JobStep, MemoryRecord
-from agno_plus.core.pipeline.chunking import chunk_text, chunk_text_structured
+from agno_plus.core.models import Document, JobState, JobStep, MemoryRecord
+from agno_plus.core.pipeline.chunking import (
+    chunk_prose_block,
+    chunk_table_block,
+    chunk_text,
+    chunk_text_structured,
+)
 from agno_plus.core.pipeline.worker import IngestionPipeline, IngestionWorker
 from agno_plus.core.readers.spreadsheet import SpreadsheetReader
 from agno_plus.core.time_grounding.grounder import TemporalGrounder
@@ -243,3 +248,119 @@ def test_pipeline_status_unknown_job_raises():
     pipeline = make_pipeline(store)
     with pytest.raises(KeyError):
         pipeline.status("nonexistent_job")
+
+
+# ---------------------------------------------------------------------------
+# chunk_table_block — table-aware row-level chunking
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_table_block_summary_plus_rows():
+    chunks = chunk_table_block(
+        columns=["Tier", "Price"],
+        rows=[{"Tier": "Bronze", "Price": "100"}, {"Tier": "Gold", "Price": "200"}],
+    )
+    # One summary + N rows
+    assert len(chunks) == 3
+    assert "columns: Tier, Price" in chunks[0]
+    assert "2 rows" in chunks[0]
+    assert "Tier: Bronze" in chunks[1] and "Price: 100" in chunks[1]
+    assert "Tier: Gold" in chunks[2]
+
+
+def test_chunk_table_block_includes_breadcrumb_and_label():
+    chunks = chunk_table_block(
+        columns=["A"],
+        rows=[{"A": "1"}],
+        headings=["Section 3", "3.1 Pricing"],
+        table_label="Pricing Tiers",
+    )
+    for c in chunks:
+        assert "Section 3 > 3.1 Pricing" in c
+        assert "Pricing Tiers" in c
+
+
+def test_chunk_table_block_empty_returns_empty():
+    assert chunk_table_block(columns=[], rows=[]) == []
+    assert chunk_table_block(columns=["A"], rows=[]) == []
+
+
+def test_chunk_table_block_singular_row_word():
+    chunks = chunk_table_block(columns=["A"], rows=[{"A": "1"}])
+    assert "1 row" in chunks[0] and "1 rows" not in chunks[0]
+
+
+# ---------------------------------------------------------------------------
+# chunk_prose_block — heading breadcrumb on prose
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_prose_block_prepends_breadcrumb():
+    chunks = chunk_prose_block("Some paragraph text.", headings=["Section 3", "3.1 Pricing"])
+    assert chunks
+    assert all(c.startswith("[Section 3 > 3.1 Pricing] ") for c in chunks)
+
+
+def test_chunk_prose_block_no_headings_passes_through():
+    chunks = chunk_prose_block("Some paragraph text.")
+    assert chunks
+    assert not any(c.startswith("[") for c in chunks)
+
+
+def test_chunk_prose_block_skips_breadcrumb_when_chunk_is_heading():
+    """A block whose content IS one of the headings (e.g. a single-line section
+    title) shouldn't be wrapped as `[X] X` — it stays as just `X`."""
+    chunks = chunk_prose_block("INVOICE", headings=["INVOICE"])
+    assert chunks == ["INVOICE"]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline dispatch by block_type
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_dispatches_table_block_to_row_chunks():
+    """When a reader emits a Document with block_type='table' and table_rows
+    in metadata, the pipeline must use chunk_table_block — producing one chunk
+    per row, not one chunk per markdown table."""
+
+    class _TableReader:
+        def read(self, source, **kwargs):
+            return [
+                Document(
+                    id="d1",
+                    content="### Table (page 1)\n| Tier | Price |\n|---|---|\n| Bronze | 100 |\n| Gold | 200 |",
+                    source_type="pdf",
+                    source_name="x.pdf",
+                    metadata={
+                        "block_type": "table",
+                        "page_number": 1,
+                        "headings": ["3.1 Pricing"],
+                        "table_label": "3.1 Pricing",
+                        "table_columns": ["Tier", "Price"],
+                        "table_rows": [
+                            {"Tier": "Bronze", "Price": "100"},
+                            {"Tier": "Gold", "Price": "200"},
+                        ],
+                    },
+                )
+            ]
+
+    store = FakeMemoryStore()
+    pipeline = IngestionPipeline(
+        readers={".pdf": _TableReader()},
+        memory_store=store,
+        grounder=TemporalGrounder(),
+    )
+    pipeline.submit(b"_", "x.pdf", {"user_id": "u1"})
+
+    assert len(store.records) == 3  # summary + 2 rows
+    summary, row1, row2 = store.records
+    assert "columns: Tier, Price" in summary[0]
+    assert "Tier: Bronze" in row1[0] and "Price: 100" in row1[0]
+    assert "Tier: Gold" in row2[0]
+    # Every chunk carries the source metadata
+    for _, meta in store.records:
+        assert meta["block_type"] == "table"
+        assert meta["page_number"] == 1
+        assert meta["table_label"] == "3.1 Pricing"

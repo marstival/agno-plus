@@ -20,7 +20,11 @@ from agno_plus.core.models import (
     MemoryStore,
 )
 from agno_plus.core.readers.base import Reader
-from agno_plus.core.pipeline.chunking import chunk_text_structured
+from agno_plus.core.pipeline.chunking import (
+    chunk_prose_block,
+    chunk_table_block,
+    chunk_text_structured,
+)
 from agno_plus.core.time_grounding.grounder import TemporalGrounder
 from agno_plus.core.time_grounding.models import GroundingMode
 
@@ -171,18 +175,34 @@ class IngestionPipeline:
         can propagate per-block fields (page_number, block_type, headings,
         table_label, …) into the vector store. Without this, retrieval results
         lose every signal the reader produced and citations are impossible.
+
+        Dispatches by `block_type` in the document metadata:
+          - "table" with table_columns/table_rows → chunk_table_block
+            (summary + one row per chunk, self-contained with breadcrumb)
+          - anything else → chunk_prose_block (prepends heading breadcrumb)
         """
         chunks: list[tuple[str, dict[str, Any]]] = []
         for doc in documents:
-            strs = (
-                chunk_text_structured(
-                    doc.content,
-                    max_tokens=self._max_tokens,
-                    overlap_tokens=self._overlap_tokens,
-                )
-                or [doc.content]  # never produce empty output for non-empty doc
-            )
             doc_meta = dict(doc.metadata)
+            strs = self._chunk_one(doc, doc_meta)
             for s in strs:
                 chunks.append((s, doc_meta))
         return chunks
+
+    def _chunk_one(self, doc: Document, meta: dict[str, Any]) -> list[str]:
+        block_type = meta.get("block_type")
+        headings = meta.get("headings") or None
+        if block_type == "table" and meta.get("table_columns") and meta.get("table_rows"):
+            strs = chunk_table_block(
+                columns=list(meta["table_columns"]),
+                rows=list(meta["table_rows"]),
+                headings=headings,
+                table_label=meta.get("table_label"),
+            )
+            return strs or [doc.content]
+        return chunk_prose_block(
+            doc.content,
+            headings=headings,
+            max_tokens=self._max_tokens,
+            overlap_tokens=self._overlap_tokens,
+        )

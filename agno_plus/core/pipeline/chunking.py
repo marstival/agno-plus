@@ -1,11 +1,18 @@
 """Semantic merge chunking — deterministic, no framework dependencies.
 
-Two strategies:
-  chunk_text_structured — preferred: splits on structural boundaries
+Three strategies:
+  chunk_text_structured — preferred for prose: splits on structural boundaries
       (headings, bullets, speaker turns) then merges small blocks up to
       max_tokens. Accepts an optional cosine-similarity function for
       semantic merge decisions (inject from adapter layer).
   chunk_text — fallback: simple word-count sliding window with overlap.
+  chunk_table_block — for tabular blocks: emits one summary chunk plus one
+      chunk per row. Each row chunk repeats the heading breadcrumb,
+      table label, and column labels so it is self-contained for vector
+      retrieval. Designed to be called by the pipeline when a Document's
+      metadata indicates block_type='table'.
+  chunk_prose_block — wraps chunk_text_structured and prepends a heading
+      breadcrumb so prose chunks carry their section context.
 """
 
 from __future__ import annotations
@@ -37,6 +44,72 @@ def chunk_text_structured(
     if not blocks:
         return []
     return _merge_blocks(blocks, max_tokens, overlap_tokens, similarity_fn, similarity_threshold)
+
+
+def chunk_table_block(
+    *,
+    columns: list[str],
+    rows: list[dict[str, str]],
+    headings: list[str] | None = None,
+    table_label: str | None = None,
+) -> list[str]:
+    """Produce one summary chunk + one chunk per row for a structured table.
+
+    Each chunk is self-contained: every row chunk repeats the column labels
+    inline as key/value pairs, prefixed with the table's heading breadcrumb
+    and label. The summary chunk lets queries like "do I have a pricing
+    table?" hit even when no individual row is the best match.
+
+    Args:
+        columns: Column names in order.
+        rows: List of {column_name: value} dicts.
+        headings: Section-heading stack at the table's location, deepest last.
+        table_label: Most recent heading, table caption, or None.
+
+    Returns: [summary, row1, row2, ...] — empty if columns or rows are empty.
+    """
+    if not columns or not rows:
+        return []
+
+    parts: list[str] = []
+    if headings:
+        parts.append(" > ".join(headings))
+    parts.append(table_label or "Table")
+    prefix = " — ".join(parts)
+
+    rowword = "row" if len(rows) == 1 else "rows"
+    summary = f"{prefix} — columns: {', '.join(columns)} — {len(rows)} {rowword}"
+
+    row_chunks: list[str] = []
+    for row in rows:
+        kv = ", ".join(f"{c}: {row.get(c, '')}" for c in columns)
+        row_chunks.append(f"{prefix} — {kv}")
+
+    return [summary, *row_chunks]
+
+
+def chunk_prose_block(
+    content: str,
+    *,
+    headings: list[str] | None = None,
+    max_tokens: int = 400,
+    overlap_tokens: int = 40,
+) -> list[str]:
+    """Chunk prose with a heading breadcrumb prepended to each chunk.
+
+    Falls through to chunk_text_structured then prepends `[Heading > ...] `
+    so the chunk carries its section context. Skips the prefix when a chunk
+    is itself one of the headings, to avoid `[X] X` duplication.
+    """
+    base = chunk_text_structured(content, max_tokens, overlap_tokens) or [content]
+    if not headings:
+        return base
+    breadcrumb = " > ".join(headings)
+    headings_set = {h.strip() for h in headings}
+    return [
+        c if c.strip() in headings_set else f"[{breadcrumb}] {c}"
+        for c in base
+    ]
 
 
 def chunk_text(
