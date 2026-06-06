@@ -244,13 +244,25 @@ def run_structured(
         jobs.finish(jid, error=f"sql ingest failed: {exc}")
         return
 
+    # Column descriptions are auto-inferred from the data using an LLM, in
+    # the background as part of the ingestion job (not blocking the upload
+    # response). Best-effort: failure (no key, rate limit, parse error) just
+    # leaves descriptions empty — the user can fill them in via the editor.
+    jobs.set_step(jid, "annotate")
+    col_descriptions = _infer_column_descriptions(
+        table_name=table_name,
+        table_description=description,
+        headers=headers,
+        rows=rows,
+    )
+
     annotations[table_name] = {
         "description": description,
         "columns": [
             {
                 "name": safe_col_name(h),
                 "type": col_types.get(safe_col_name(h), "TEXT"),
-                "description": "",
+                "description": col_descriptions.get(safe_col_name(h), ""),
             }
             for h in headers
         ],
@@ -261,9 +273,60 @@ def run_structured(
         "filename": filename,
         "table_name": table_name,
         "description": description,
-        "columns": {c: {"type": col_types.get(safe_col_name(c), "TEXT"), "description": ""} for c in headers},
+        "columns": {
+            c: {
+                "type": col_types.get(safe_col_name(c), "TEXT"),
+                "description": col_descriptions.get(safe_col_name(c), ""),
+            }
+            for c in headers
+        },
         "row_count": len(rows),
         "sample_rows": rows[:5],
     }
     _record_file(file_id, chunks=0, preview=preview, tables=[table_name])
     jobs.finish(jid)
+
+
+def _infer_column_descriptions(
+    *,
+    table_name: str,
+    table_description: str,
+    headers: list[str],
+    rows: list[dict[str, str]],
+) -> dict[str, str]:
+    """Best-effort LLM call to suggest column descriptions. Keys are the safe
+    PG column names so they slot directly into the annotation row. Returns
+    an empty dict on any failure — column descriptions stay blank but the
+    job still finishes successfully and the SQL table is usable.
+    """
+    safe_cols = [safe_col_name(h) for h in headers]
+    sample_text = "\n".join(str(r) for r in rows[:3])
+    context = (
+        f"Table '{table_name}' — {table_description}"
+        if table_description
+        else f"Table '{table_name}'"
+    )
+    prompt = (
+        f"{context}\n"
+        f"Columns: {', '.join(safe_cols)}\n"
+        f"Sample rows:\n{sample_text}\n\n"
+        "Write a short description (max 15 words) for each column based on "
+        "the data and the table context. Reply only with JSON: "
+        '{"column_name": "description", ...}. Use the exact column names above as keys.'
+    )
+    try:
+        raw = call_llm(
+            prompt,
+            backend=settings.llm_backend,
+            model=settings.llm_model,
+            api_key=settings.openai_api_key,
+            base_url=settings.ollama_url,
+            json_response=True,
+        )
+        parsed = json.loads(raw)
+    except Exception as exc:
+        print(f"[warn] column description inference failed for {table_name}: {exc}")
+        return {}
+    # Only keep keys that match an actual safe column name.
+    valid = set(safe_cols)
+    return {k: str(v) for k, v in parsed.items() if k in valid}
