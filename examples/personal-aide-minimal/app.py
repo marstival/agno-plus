@@ -282,38 +282,72 @@ class CommitStructuredRequest(BaseModel):
 
 @app.post("/ingest/commit/structured")
 async def commit_structured(body: CommitStructuredRequest) -> dict[str, Any]:
+    """Dispatch the SQL upsert + registry write to a background thread and
+    return a job_id immediately. The UI polls /jobs/{id} via JobStatusWidget
+    to render the same READ → UPSERT progression the semantic path uses."""
     pv = _previews.pop(body.preview_id, None)
     if not pv:
         raise HTTPException(404, "Preview expired or not found — re-upload the file")
 
-    filename = pv["filename"]
+    # Resolve final column types + descriptions before backgrounding so the
+    # worker is pure I/O. ALLOWED_PG_TYPES is the gate; anything else falls
+    # back to the inferred type.
     headers = pv["headers"]
-    rows = pv["rows"]
-    table_name = pv["table_name"]
     inferred_types = pv["col_types"]
-
-    # User-edited types override inferred; only ALLOWED_PG_TYPES are honored.
     type_by_original: dict[str, str | None] = {c.get("name"): c.get("type") for c in body.columns}
     final_types: dict[str, str] = {}
     for h in headers:
         safe = safe_col_name(h)
         chosen = (type_by_original.get(h) or "").upper()
         final_types[safe] = chosen if chosen in ALLOWED_PG_TYPES else inferred_types.get(safe, "TEXT")
+    desc_by_original = {c.get("name"): c.get("description", "") for c in body.columns}
 
-    # Persist raw file + aide_files row
     file_id = f"f_{uuid.uuid4().hex[:10]}"
+    jid = jobs.new_job()
+    threading.Thread(
+        target=_commit_structured_worker,
+        args=(jid, file_id, pv, final_types, body.description, desc_by_original),
+        daemon=True,
+    ).start()
+    return {"job_id": jid, "file_id": file_id, "table_name": pv["table_name"]}
+
+
+def _commit_structured_worker(
+    jid: str,
+    file_id: str,
+    pv: dict[str, Any],
+    final_types: dict[str, str],
+    table_description: str,
+    desc_by_original: dict[str, str],
+) -> None:
+    """Background worker for /ingest/commit/structured.
+
+    Step model (mirrors the structured ingest contract):
+      READ   — data already in memory from the preview step (instant)
+      UPSERT — create_dynamic_table + bulk_insert + aide_files registry
+    """
+    filename = pv["filename"]
+    headers = pv["headers"]
+    rows = pv["rows"]
+    table_name = pv["table_name"]
+
+    jobs.set_step(jid, "read")  # marker — data was read during preview
+
+    jobs.set_step(jid, "upsert")
     storage_key = storage().save(USER_ID, file_id, filename, pv["content"])
     try:
         create_dynamic_table(engine(), table_name, headers, final_types)
         bulk_insert(engine(), table_name, headers, rows)
     except Exception as exc:
-        storage().delete(storage_key)
-        raise HTTPException(500, f"SQL ingest failed: {exc}")
+        try:
+            storage().delete(storage_key)
+        except Exception:
+            pass
+        jobs.finish(jid, error=f"SQL ingest failed: {exc}")
+        return
 
-    # Apply user-supplied annotation
-    desc_by_original = {c.get("name"): c.get("description", "") for c in body.columns}
     ingestion.annotations[table_name] = {
-        "description": body.description,
+        "description": table_description,
         "columns": [
             {
                 "name": safe_col_name(h),
@@ -324,11 +358,11 @@ async def commit_structured(body: CommitStructuredRequest) -> dict[str, Any]:
         ],
     }
 
-    preview = {
+    extraction_preview = {
         "source_type": "structured",
         "filename": filename,
         "table_name": table_name,
-        "description": body.description,
+        "description": table_description,
         "columns": {
             h: {
                 "type": final_types[safe_col_name(h)],
@@ -339,18 +373,22 @@ async def commit_structured(body: CommitStructuredRequest) -> dict[str, Any]:
         "row_count": len(rows),
         "sample_rows": rows[:5],
     }
-    with engine().begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO aide_files (id, filename, source_type, chunks_count, "
-                "storage_key, tables_created, extraction_preview) "
-                "VALUES (:id, :fn, 'structured', 0, :sk, :tc, cast(:p as jsonb))"
-            ),
-            {"id": file_id, "fn": filename, "sk": storage_key,
-             "tc": [table_name], "p": json.dumps(preview)},
-        )
+    try:
+        with engine().begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO aide_files (id, filename, source_type, chunks_count, "
+                    "storage_key, tables_created, extraction_preview) "
+                    "VALUES (:id, :fn, 'structured', 0, :sk, :tc, cast(:p as jsonb))"
+                ),
+                {"id": file_id, "fn": filename, "sk": storage_key,
+                 "tc": [table_name], "p": json.dumps(extraction_preview)},
+            )
+    except Exception as exc:
+        jobs.finish(jid, error=f"registry write failed: {exc}")
+        return
 
-    return {"file_id": file_id, "table_name": table_name}
+    jobs.finish(jid)
 
 
 @app.delete("/ingest/preview/{preview_id}")

@@ -153,6 +153,7 @@ function StructuredTab({
   const [preview, setPreview] = useState<StructuredPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [tablesKey, setTablesKey] = useState(0);
 
   const handleFile = async (file: File) => {
@@ -187,9 +188,9 @@ function StructuredTab({
           fetch(`${apiBase}/ingest/preview/${preview.preview_id}`, { method: "DELETE" }).catch(() => {});
           setPreview(null);
         }}
-        onCommitted={() => {
+        onCommitted={(jobId) => {
           setPreview(null);
-          setTablesKey((k) => k + 1);
+          setActiveJobId(jobId);
         }}
       />
     );
@@ -214,6 +215,20 @@ function StructuredTab({
           {previewing && <p style={s.hint}>Parsing &amp; inferring schema…</p>}
           {previewError && <p style={s.error}>{previewError}</p>}
         </section>
+        {activeJobId && (
+          <section style={s.card}>
+            <h2 style={s.title}>Ingestion progress</h2>
+            <JobStatusWidget
+              jobId={activeJobId}
+              statusUrl={`${apiBase}/jobs`}
+              onComplete={() => {
+                setActiveJobId(null);
+                setTablesKey((k) => k + 1);
+              }}
+              pollIntervalMs={500}
+            />
+          </section>
+        )}
       </div>
       <section style={{ ...s.card, marginTop: 20 }}>
         <h2 style={s.title}>Loaded tables</h2>
@@ -258,7 +273,7 @@ function StructuredPreviewForm({
   apiBase: string;
   preview: StructuredPreview;
   onCancel: () => void;
-  onCommitted: () => void;
+  onCommitted: (jobId: string) => void;
 }) {
   const [description, setDescription] = useState(preview.description);
   const [columns, setColumns] = useState(preview.columns);
@@ -289,7 +304,7 @@ function StructuredPreviewForm({
       if (!res.ok) {
         setError(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`);
       } else {
-        onCommitted();
+        onCommitted(data.job_id as string);
       }
     } catch (e) {
       setError(String(e));
