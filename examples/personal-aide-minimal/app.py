@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,14 +31,10 @@ from sqlalchemy import text
 from starlette.requests import Request
 
 from agno_plus.adapters.llm import call_llm
-from agno_plus.core.readers.spreadsheet import SpreadsheetReader
 from agno_plus.core.structured import (
     ALLOWED_PG_TYPES,
-    bulk_insert,
-    create_dynamic_table,
     drop_table,
     fetch_sample_rows,
-    infer_column_types,
     safe_col_name,
 )
 
@@ -120,10 +115,17 @@ def _classify(filename: str, ingest_mode: str) -> str:
     return "document"
 
 
-def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type: str) -> None:
+def _run_ingest(
+    jid: str,
+    file_id: str,
+    content: bytes,
+    filename: str,
+    src_type: str,
+    description: str,
+) -> None:
     try:
         if src_type == "structured":
-            ingestion.run_structured(jid, file_id, content, filename)
+            ingestion.run_structured(jid, file_id, content, filename, description=description)
         elif src_type == "image":
             ingestion.run_image(jid, file_id, content, filename)
         else:
@@ -135,7 +137,8 @@ def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type:
 @app.post("/ingest")
 async def ingest(
     file: UploadFile = File(...),
-    ingest_mode: str = Form(...),  # "structured" | "semantic" — must be explicit
+    ingest_mode: str = Form(...),         # "structured" | "semantic" — must be explicit
+    description: str = Form(""),          # user-supplied table description (structured only)
 ) -> dict[str, str]:
     content = await file.read()
     filename = file.filename or "upload"
@@ -153,7 +156,9 @@ async def ingest(
 
     jid = jobs.new_job()
     threading.Thread(
-        target=_run_ingest, args=(jid, file_id, content, filename, src_type), daemon=True
+        target=_run_ingest,
+        args=(jid, file_id, content, filename, src_type, description),
+        daemon=True,
     ).start()
     return {"job_id": jid, "file_id": file_id}
 
@@ -164,237 +169,6 @@ def job_status(job_id: str) -> dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
-
-
-# ---------------------------------------------------------------------------
-# Two-step structured ingest: preview (read + infer) → commit (write)
-#
-# /ingest/preview/structured parses the file in memory, returns the inferred
-# table name + column types + LLM-suggested descriptions for the user to
-# review/edit. /ingest/commit/structured takes the edited annotation and
-# does the actual SQL create + insert + aide_files row.
-#
-# Preview state lives in an in-process dict with a 30-minute TTL. A real
-# app would use Redis or DB-backed preview rows (see G-0002).
-# ---------------------------------------------------------------------------
-
-_PREVIEW_TTL_SECONDS = 30 * 60
-_previews: dict[str, dict[str, Any]] = {}
-
-
-def _gc_previews() -> None:
-    now = time.time()
-    expired = [pid for pid, pv in _previews.items() if now - pv["created_at"] > _PREVIEW_TTL_SECONDS]
-    for pid in expired:
-        _previews.pop(pid, None)
-
-
-def _suggest_column_descriptions(
-    table_name: str, headers: list[str], rows: list[dict[str, str]]
-) -> dict[str, str]:
-    """Best-effort LLM call to pre-fill column descriptions. Empty dict on failure."""
-    sample = rows[:3]
-    sample_text = "\n".join(str(r) for r in sample)
-    try:
-        raw = call_llm(
-            f"Database table '{table_name}' columns: {', '.join(headers)}\n"
-            f"Sample rows:\n{sample_text}\n\n"
-            "Write a short description (max 15 words) for each column. "
-            'Reply only with JSON: {"col_name": "description", ...}',
-            backend=settings.llm_backend,
-            model=settings.llm_model,
-            api_key=settings.openai_api_key,
-            base_url=settings.ollama_url,
-            json_response=True,
-        )
-        return json.loads(raw)
-    except Exception:
-        return {}
-
-
-@app.post("/ingest/preview/structured")
-async def preview_structured(file: UploadFile = File(...)) -> dict[str, Any]:
-    """Parse a spreadsheet, infer the schema, return a preview for the user
-    to edit before committing. The file bytes stay in memory until commit."""
-    _gc_previews()
-    content = await file.read()
-    filename = file.filename or "upload"
-    ext = Path(filename).suffix.lower()
-    if ext not in _SPREADSHEET_EXTS:
-        raise HTTPException(400, f"preview only supports {sorted(_SPREADSHEET_EXTS)}")
-
-    reader = SpreadsheetReader()
-    try:
-        tables = reader.extract_tables(content, filename)
-    except Exception as exc:
-        raise HTTPException(400, f"could not parse file: {exc}")
-    if not tables or not tables[0]["headers"]:
-        raise HTTPException(
-            422,
-            "No tabular structure detected. The file looks like a styled "
-            "template or free-form note rather than a clean table. Upload "
-            "this file under the Semantic tab to embed it for RAG instead.",
-        )
-
-    headers = tables[0]["headers"]
-    rows = tables[0]["rows"]
-    safe_name = safe_col_name(Path(filename).stem)[:32]
-    table_name = f"sd_{DOMAIN_ID[:8]}_{safe_name}"
-    col_types = infer_column_types(headers, rows)
-    suggestions = _suggest_column_descriptions(table_name, headers, rows)
-
-    preview_id = f"pre_{uuid.uuid4().hex[:10]}"
-    _previews[preview_id] = {
-        "created_at": time.time(),
-        "filename": filename,
-        "content": content,
-        "table_name": table_name,
-        "headers": headers,
-        "rows": rows,
-        "col_types": col_types,
-    }
-
-    return {
-        "preview_id": preview_id,
-        "filename": filename,
-        "table_name": table_name,
-        "row_count": len(rows),
-        "sample_rows": rows[:5],
-        "description": "",  # user fills in
-        "columns": [
-            {
-                "name": h,                                  # original header (for display)
-                "safe_name": safe_col_name(h),              # what the SQL column will be
-                "type": col_types.get(safe_col_name(h), "TEXT"),
-                "description": suggestions.get(h, ""),       # LLM-suggested, user-editable
-                "allowed_types": sorted(ALLOWED_PG_TYPES),
-            }
-            for h in headers
-        ],
-    }
-
-
-class CommitStructuredRequest(BaseModel):
-    preview_id: str
-    description: str = ""
-    columns: list[dict[str, Any]] = []  # [{name, type, description}, ...]
-
-
-@app.post("/ingest/commit/structured")
-async def commit_structured(body: CommitStructuredRequest) -> dict[str, Any]:
-    """Dispatch the SQL upsert + registry write to a background thread and
-    return a job_id immediately. The UI polls /jobs/{id} via JobStatusWidget
-    to render the same READ → UPSERT progression the semantic path uses."""
-    pv = _previews.pop(body.preview_id, None)
-    if not pv:
-        raise HTTPException(404, "Preview expired or not found — re-upload the file")
-
-    # Resolve final column types + descriptions before backgrounding so the
-    # worker is pure I/O. ALLOWED_PG_TYPES is the gate; anything else falls
-    # back to the inferred type.
-    headers = pv["headers"]
-    inferred_types = pv["col_types"]
-    type_by_original: dict[str, str | None] = {c.get("name"): c.get("type") for c in body.columns}
-    final_types: dict[str, str] = {}
-    for h in headers:
-        safe = safe_col_name(h)
-        chosen = (type_by_original.get(h) or "").upper()
-        final_types[safe] = chosen if chosen in ALLOWED_PG_TYPES else inferred_types.get(safe, "TEXT")
-    desc_by_original = {c.get("name"): c.get("description", "") for c in body.columns}
-
-    file_id = f"f_{uuid.uuid4().hex[:10]}"
-    jid = jobs.new_job()
-    threading.Thread(
-        target=_commit_structured_worker,
-        args=(jid, file_id, pv, final_types, body.description, desc_by_original),
-        daemon=True,
-    ).start()
-    return {"job_id": jid, "file_id": file_id, "table_name": pv["table_name"]}
-
-
-def _commit_structured_worker(
-    jid: str,
-    file_id: str,
-    pv: dict[str, Any],
-    final_types: dict[str, str],
-    table_description: str,
-    desc_by_original: dict[str, str],
-) -> None:
-    """Background worker for /ingest/commit/structured.
-
-    Step model (mirrors the structured ingest contract):
-      READ   — data already in memory from the preview step (instant)
-      UPSERT — create_dynamic_table + bulk_insert + aide_files registry
-    """
-    filename = pv["filename"]
-    headers = pv["headers"]
-    rows = pv["rows"]
-    table_name = pv["table_name"]
-
-    jobs.set_step(jid, "read")  # marker — data was read during preview
-
-    jobs.set_step(jid, "upsert")
-    storage_key = storage().save(USER_ID, file_id, filename, pv["content"])
-    try:
-        create_dynamic_table(engine(), table_name, headers, final_types)
-        bulk_insert(engine(), table_name, headers, rows)
-    except Exception as exc:
-        try:
-            storage().delete(storage_key)
-        except Exception:
-            pass
-        jobs.finish(jid, error=f"SQL ingest failed: {exc}")
-        return
-
-    ingestion.annotations[table_name] = {
-        "description": table_description,
-        "columns": [
-            {
-                "name": safe_col_name(h),
-                "type": final_types[safe_col_name(h)],
-                "description": desc_by_original.get(h, ""),
-            }
-            for h in headers
-        ],
-    }
-
-    extraction_preview = {
-        "source_type": "structured",
-        "filename": filename,
-        "table_name": table_name,
-        "description": table_description,
-        "columns": {
-            h: {
-                "type": final_types[safe_col_name(h)],
-                "description": desc_by_original.get(h, ""),
-            }
-            for h in headers
-        },
-        "row_count": len(rows),
-        "sample_rows": rows[:5],
-    }
-    try:
-        with engine().begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO aide_files (id, filename, source_type, chunks_count, "
-                    "storage_key, tables_created, extraction_preview) "
-                    "VALUES (:id, :fn, 'structured', 0, :sk, :tc, cast(:p as jsonb))"
-                ),
-                {"id": file_id, "fn": filename, "sk": storage_key,
-                 "tc": [table_name], "p": json.dumps(extraction_preview)},
-            )
-    except Exception as exc:
-        jobs.finish(jid, error=f"registry write failed: {exc}")
-        return
-
-    jobs.finish(jid)
-
-
-@app.delete("/ingest/preview/{preview_id}")
-def cancel_preview(preview_id: str) -> dict[str, str]:
-    _previews.pop(preview_id, None)
-    return {"status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------
@@ -548,9 +322,73 @@ def get_annotation(domain_id: str, table_name: str) -> dict[str, Any]:
 
 
 @app.patch("/ingest/structured/{domain_id}/{table_name}/annotation")
-async def save_annotation(domain_id: str, table_name: str, body: dict[str, Any]) -> dict[str, str]:
+async def save_annotation(
+    domain_id: str, table_name: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist the annotation. If a column's type differs from the current
+    information_schema type, issue ALTER TABLE … ALTER COLUMN … TYPE … USING.
+
+    All ALTERs run in one transaction — a single failed cast (e.g. TEXT →
+    BIGINT with non-numeric values) rolls back every type change so the
+    table never ends up in a partial state. Description-only edits skip
+    the SQL path entirely.
+    """
+    # Guard: only the user's sd_* tables may be altered through this route.
+    if not table_name.startswith(f"sd_{DOMAIN_ID[:8]}_"):
+        raise HTTPException(403, "table is not in the user's structured domain")
+
+    cols_body = body.get("columns") or []
+
+    with engine().connect() as conn:
+        current = conn.execute(
+            text("SELECT column_name, data_type FROM information_schema.columns "
+                 "WHERE table_schema='public' AND table_name=:t "
+                 "AND column_name != '_row_id'"),
+            {"t": table_name},
+        ).fetchall()
+    if not current:
+        raise HTTPException(404, f"table {table_name!r} not found")
+    current_types: dict[str, str] = {
+        row.column_name: _PG_TYPE_MAP.get(row.data_type.lower(), "TEXT")
+        for row in current
+    }
+
+    # Resolve the set of intended type changes (skip unknown columns silently —
+    # they're annotation-only).
+    type_changes: list[tuple[str, str, str]] = []
+    for c in cols_body:
+        col = (c.get("name") or "").strip()
+        new_type = (c.get("type") or "").upper()
+        if col not in current_types or new_type not in ALLOWED_PG_TYPES:
+            continue
+        if new_type != current_types[col]:
+            type_changes.append((col, current_types[col], new_type))
+
+    if type_changes:
+        try:
+            with engine().begin() as conn:
+                for col, _old, new_type in type_changes:
+                    conn.execute(text(
+                        f'ALTER TABLE "{table_name}" '
+                        f'ALTER COLUMN "{col}" TYPE {new_type} '
+                        f'USING "{col}"::{new_type.lower()}'
+                    ))
+        except Exception as exc:
+            # One failure → whole transaction rolled back, no partial change.
+            offending = " ".join(str(exc).split())[:240]
+            raise HTTPException(
+                400,
+                f"Could not change column type: {offending}. No schema changes "
+                "were applied. Ensure existing values can be cast to the new type.",
+            )
+
     annotations[table_name] = body
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "type_changes": [
+            {"column": c, "from": o, "to": n} for c, o, n in type_changes
+        ],
+    }
 
 
 @app.post("/domains/{domain_id}/infer-schema")

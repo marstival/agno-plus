@@ -34,7 +34,6 @@ from agno_plus.core.readers.spreadsheet import SpreadsheetReader
 from agno_plus.core.structured import (
     bulk_insert,
     create_dynamic_table,
-    fetch_sample_rows,
     infer_column_types,
     safe_col_name,
 )
@@ -185,7 +184,14 @@ def run_image(jid: str, file_id: str, content: bytes, filename: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> None:
+def run_structured(
+    jid: str,
+    file_id: str,
+    content: bytes,
+    filename: str,
+    *,
+    description: str = "",
+) -> None:
     """CSV/XLSX → dynamic PG table only (no semantic embedding).
 
     The agent reaches this data via SQLTools. Embedding a flattened text
@@ -196,7 +202,14 @@ def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> Non
 
     Step model:
         read   — SpreadsheetReader.extract_tables() returns headers + rows
-        upsert — create_dynamic_table + bulk_insert
+        upsert — create_dynamic_table + bulk_insert + annotation write
+
+    The `description` argument is the user-supplied table description
+    captured before upload — written into annotations[table_name][
+    "description"] alongside the inferred column types. Column descriptions
+    start empty; the user fills them in later via the schema editor
+    (PATCH /ingest/structured/.../annotation), which also handles ALTER
+    TABLE if column types are edited.
     """
     jobs.set_step(jid, JobStep.READ)
     try:
@@ -231,45 +244,26 @@ def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> Non
         jobs.finish(jid, error=f"sql ingest failed: {exc}")
         return
 
-    _infer_annotations(table_name, col_types)
+    annotations[table_name] = {
+        "description": description,
+        "columns": [
+            {
+                "name": safe_col_name(h),
+                "type": col_types.get(safe_col_name(h), "TEXT"),
+                "description": "",
+            }
+            for h in headers
+        ],
+    }
 
     preview = {
         "source_type": "structured",
         "filename": filename,
         "table_name": table_name,
+        "description": description,
         "columns": {c: {"type": col_types.get(safe_col_name(c), "TEXT"), "description": ""} for c in headers},
         "row_count": len(rows),
         "sample_rows": rows[:5],
     }
     _record_file(file_id, chunks=0, preview=preview, tables=[table_name])
     jobs.finish(jid)
-
-
-def _infer_annotations(table_name: str, col_types: dict[str, str]) -> None:
-    col_names = list(col_types.keys())
-    sample = fetch_sample_rows(engine(), table_name, limit=3)
-    sample_text = "\n".join(str(r) for r in sample)
-    try:
-        raw = call_llm(
-            f"Database table '{table_name}' columns: {', '.join(col_names)}\n"
-            f"Sample rows:\n{sample_text}\n\n"
-            "Write a short description (max 15 words) for each column. "
-            'Reply only with JSON: {"col_name": "description", ...}',
-            backend=settings.llm_backend,
-            model=settings.llm_model,
-            api_key=settings.openai_api_key,
-            base_url=settings.ollama_url,
-            json_response=True,
-        )
-        descs = json.loads(raw)
-    except Exception as exc:
-        print(f"[warn] schema inference failed for {table_name}: {exc}")
-        descs = {}
-
-    annotations[table_name] = {
-        "description": "",
-        "columns": [
-            {"name": col, "type": col_types.get(col, "TEXT"), "description": descs.get(col, "")}
-            for col in col_names
-        ],
-    }

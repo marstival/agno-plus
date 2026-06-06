@@ -121,27 +121,10 @@ function SemanticTab({
 }
 
 // ---------------------------------------------------------------------------
-// Structured tab — file picker → preview-and-edit form → commit. Shows
-// "Loaded Tables" below.
+// Structured tab — file picker + table description input + Upload button.
+// The schema is inferred during ingestion (no synchronous preview round-trip).
+// Column descriptions stay empty until the user opens the schema editor below.
 // ---------------------------------------------------------------------------
-
-interface PreviewColumn {
-  name: string;
-  safe_name: string;
-  type: string;
-  description: string;
-  allowed_types: string[];
-}
-
-interface StructuredPreview {
-  preview_id: string;
-  filename: string;
-  table_name: string;
-  row_count: number;
-  sample_rows: Array<Record<string, string>>;
-  description: string;
-  columns: PreviewColumn[];
-}
 
 function StructuredTab({
   apiBase,
@@ -150,51 +133,37 @@ function StructuredTab({
   apiBase: string;
   onPreviewFile: (p: { title: string; data: unknown }) => void;
 }) {
-  const [preview, setPreview] = useState<StructuredPreview | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [description, setDescription] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [tablesKey, setTablesKey] = useState(0);
 
-  const handleFile = async (file: File) => {
-    setPreviewError(null);
-    setPreviewing(true);
+  const upload = async () => {
+    if (!file) return;
+    setUploadError(null);
+    setUploading(true);
     const form = new FormData();
     form.append("file", file);
+    form.append("ingest_mode", "structured");
+    form.append("description", description);
     try {
-      const res = await fetch(`${apiBase}/ingest/preview/structured`, {
-        method: "POST",
-        body: form,
-      });
+      const res = await fetch(`${apiBase}/ingest`, { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) {
-        setPreviewError(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`);
+        setUploadError(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`);
       } else {
-        setPreview(data);
+        setActiveJobId(data.job_id as string);
+        setFile(null);
+        setDescription("");
       }
     } catch (e) {
-      setPreviewError(String(e));
+      setUploadError(String(e));
     } finally {
-      setPreviewing(false);
+      setUploading(false);
     }
   };
-
-  if (preview) {
-    return (
-      <StructuredPreviewForm
-        apiBase={apiBase}
-        preview={preview}
-        onCancel={() => {
-          fetch(`${apiBase}/ingest/preview/${preview.preview_id}`, { method: "DELETE" }).catch(() => {});
-          setPreview(null);
-        }}
-        onCommitted={(jobId) => {
-          setPreview(null);
-          setActiveJobId(jobId);
-        }}
-      />
-    );
-  }
 
   return (
     <>
@@ -202,18 +171,36 @@ function StructuredTab({
         <section style={s.card}>
           <h2 style={s.title}>Add a structured table</h2>
           <p style={s.hint}>
-            Pick a CSV / Excel file. The schema is parsed and the LLM proposes
-            a description for each column. Review and edit the schema before
-            committing — the SQL table is created only when you press
-            <b> Ingest</b>.
+            Pick a CSV / Excel file and describe what's in it. On Upload the
+            schema is inferred from the data and the table is created. Open
+            the table in <b>Loaded tables</b> to add column descriptions or
+            change column types later.
           </p>
           <FilePicker
             accept={[".csv", ".tsv", ".xlsx", ".xls"]}
-            disabled={previewing}
-            onPicked={handleFile}
+            disabled={uploading}
+            selectedName={file?.name}
+            onPicked={setFile}
           />
-          {previewing && <p style={s.hint}>Parsing &amp; inferring schema…</p>}
-          {previewError && <p style={s.error}>{previewError}</p>}
+          <label style={{ ...s.label, marginTop: 14 }}>Table description</label>
+          <textarea
+            style={s.textarea}
+            rows={2}
+            placeholder="e.g. Q1 2024 expense report"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            disabled={uploading}
+          />
+          <div style={{ ...s.actions, justifyContent: "flex-start" }}>
+            <button
+              style={{ ...s.btnPrimary, opacity: !file || uploading ? 0.5 : 1 }}
+              onClick={upload}
+              disabled={!file || uploading}
+            >
+              {uploading ? "Uploading…" : "Upload"}
+            </button>
+          </div>
+          {uploadError && <p style={s.error}>{uploadError}</p>}
         </section>
         {activeJobId && (
           <section style={s.card}>
@@ -261,128 +248,6 @@ function StructuredTab({
 }
 
 // ---------------------------------------------------------------------------
-// Schema preview-and-edit form
-// ---------------------------------------------------------------------------
-
-function StructuredPreviewForm({
-  apiBase,
-  preview,
-  onCancel,
-  onCommitted,
-}: {
-  apiBase: string;
-  preview: StructuredPreview;
-  onCancel: () => void;
-  onCommitted: (jobId: string) => void;
-}) {
-  const [description, setDescription] = useState(preview.description);
-  const [columns, setColumns] = useState(preview.columns);
-  const [committing, setCommitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const updateColumn = (idx: number, patch: Partial<PreviewColumn>) =>
-    setColumns((cs) => cs.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
-
-  const commit = async () => {
-    setCommitting(true);
-    setError(null);
-    try {
-      const res = await fetch(`${apiBase}/ingest/commit/structured`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          preview_id: preview.preview_id,
-          description,
-          columns: columns.map((c) => ({
-            name: c.name,
-            type: c.type,
-            description: c.description,
-          })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`);
-      } else {
-        onCommitted(data.job_id as string);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setCommitting(false);
-    }
-  };
-
-  return (
-    <section style={{ ...s.card, marginTop: 0 }}>
-      <h2 style={s.title}>Review &amp; ingest — {preview.filename}</h2>
-      <p style={s.hint}>
-        Table <code>{preview.table_name}</code> · {preview.row_count} rows.
-        Describe the table and review each column before pressing Ingest.
-      </p>
-
-      <label style={s.label}>Table description</label>
-      <textarea
-        style={s.textarea}
-        rows={2}
-        placeholder="e.g. Q1 2024 expense report"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-      />
-
-      <div style={{ marginTop: 16 }}>
-        <div style={s.colHead}>
-          <span style={{ flex: "0 0 22%" }}>Column</span>
-          <span style={{ flex: "0 0 18%" }}>Type</span>
-          <span style={{ flex: 1 }}>Description</span>
-        </div>
-        {columns.map((c, i) => (
-          <div key={c.safe_name} style={s.colRow}>
-            <div style={{ flex: "0 0 22%" }}>
-              <div style={s.colName}>{c.name}</div>
-              <div style={s.colSafe}>SQL: {c.safe_name}</div>
-            </div>
-            <select
-              style={{ ...s.input, flex: "0 0 18%" }}
-              value={c.type}
-              onChange={(e) => updateColumn(i, { type: e.target.value })}
-            >
-              {c.allowed_types.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-            <input
-              style={{ ...s.input, flex: 1 }}
-              placeholder="describe what this column holds"
-              value={c.description}
-              onChange={(e) => updateColumn(i, { description: e.target.value })}
-            />
-          </div>
-        ))}
-      </div>
-
-      <details style={{ marginTop: 16, fontSize: 12 }}>
-        <summary style={{ cursor: "pointer", color: "#64748b" }}>
-          Sample rows ({preview.sample_rows.length})
-        </summary>
-        <pre style={s.samplePre}>{JSON.stringify(preview.sample_rows, null, 2)}</pre>
-      </details>
-
-      {error && <p style={s.error}>{error}</p>}
-
-      <div style={s.actions}>
-        <button style={s.btnSecondary} onClick={onCancel} disabled={committing}>
-          Cancel
-        </button>
-        <button style={s.btnPrimary} onClick={commit} disabled={committing}>
-          {committing ? "Ingesting…" : "Ingest"}
-        </button>
-      </div>
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Annotated table editor (re-used for post-commit edits)
 // ---------------------------------------------------------------------------
 
@@ -425,10 +290,12 @@ function AnnotatedTableEditor({
 function FilePicker({
   accept,
   disabled,
+  selectedName,
   onPicked,
 }: {
   accept: string[];
   disabled?: boolean;
+  selectedName?: string;
   onPicked: (file: File) => void;
 }) {
   return (
@@ -445,7 +312,7 @@ function FilePicker({
         style={{ display: "none" }}
       />
       <span style={s.filePickerInner}>
-        Click to choose a file ({accept.join(", ")})
+        {selectedName ? `Selected: ${selectedName}` : `Click to choose a file (${accept.join(", ")})`}
       </span>
     </label>
   );
@@ -515,66 +382,17 @@ const s: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     resize: "vertical",
   },
-  input: {
-    border: "1px solid #e2e8f0",
-    borderRadius: 6,
-    padding: "6px 8px",
-    fontSize: 13,
-    fontFamily: "inherit",
-    background: "#fff",
-  },
-  colHead: {
-    display: "flex",
-    gap: 10,
-    fontSize: 11,
-    fontWeight: 700,
-    color: "#94a3b8",
-    textTransform: "uppercase",
-    letterSpacing: "0.05em",
-    padding: "0 4px 6px",
-    borderBottom: "1px solid #f1f5f9",
-  },
-  colRow: {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-    padding: "8px 4px",
-    borderBottom: "1px dashed #f1f5f9",
-  },
-  colName: { fontSize: 13, fontWeight: 600, color: "#1e293b" },
-  colSafe: { fontSize: 11, color: "#94a3b8", fontFamily: "monospace" },
-  samplePre: {
-    background: "#0f172a",
-    color: "#e2e8f0",
-    fontSize: 11,
-    padding: 10,
-    borderRadius: 8,
-    overflowX: "auto",
-    margin: "8px 0 0",
-  },
   actions: {
     display: "flex",
     gap: 10,
     justifyContent: "flex-end",
-    marginTop: 18,
-    paddingTop: 14,
-    borderTop: "1px solid #f1f5f9",
+    marginTop: 14,
   },
   btnPrimary: {
     padding: "8px 18px",
     background: "#2563eb",
     color: "#fff",
     border: "none",
-    borderRadius: 8,
-    fontWeight: 600,
-    fontSize: 13,
-    cursor: "pointer",
-  },
-  btnSecondary: {
-    padding: "8px 18px",
-    background: "#fff",
-    color: "#475569",
-    border: "1px solid #e2e8f0",
     borderRadius: 8,
     fontWeight: 600,
     fontSize: 13,
