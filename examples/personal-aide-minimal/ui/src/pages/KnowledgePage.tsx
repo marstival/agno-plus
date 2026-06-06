@@ -582,9 +582,10 @@ const s: Record<string, React.CSSProperties> = {
   },
   filePicker: {
     display: "block",
+    maxWidth: 480,                   // match UploadWidget drop-zone width
     border: "2px dashed #cbd5e1",
     borderRadius: 12,
-    padding: "24px 20px",
+    padding: "32px 24px",            // match UploadWidget vertical/horizontal padding
     textAlign: "center",
     cursor: "pointer",
     background: "#f8fafc",
