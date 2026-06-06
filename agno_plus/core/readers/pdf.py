@@ -72,6 +72,10 @@ class _PdfBlock:
 _NUMBERED_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+([A-Z]\S.*?)\s*$")
 _ROMAN_HEADING_RE = re.compile(r"^([IVX]+)\.\s+([A-Z]\S.*?)\s*$")
 
+# Lines whose top-level number exceeds this are more likely addresses
+# ("89 Pacific Ave") or quantities than section headings.
+_NUMBERED_HEADING_MAX_TOP_LEVEL = 20
+
 
 class _HeadingStack:
     """Depth-aware heading stack updated as the reader walks PDF blocks.
@@ -89,8 +93,10 @@ class _HeadingStack:
             return
         m = _NUMBERED_HEADING_RE.match(line)
         if m:
-            depth = m.group(1).count(".") + 1
-            self._push(depth, line)
+            top = int(m.group(1).split(".", 1)[0])
+            if top <= _NUMBERED_HEADING_MAX_TOP_LEVEL:
+                depth = m.group(1).count(".") + 1
+                self._push(depth, line)
             return
         if _ROMAN_HEADING_RE.match(line):
             self._push(1, line)
@@ -106,7 +112,12 @@ class _HeadingStack:
     @staticmethod
     def _is_all_caps_heading(line: str) -> bool:
         """Conservative all-caps rule: short standalone line, no terminal punctuation,
-        every word ≥ 2 alphabetic chars (rejects column-header rows like 'Q T Y')."""
+        every word ≥ 2 alphabetic chars, and overall alphabetic content dominates.
+
+        The alpha-ratio guard (≥ 70 % letters) rejects alphanumeric tokens like
+        customer IDs ("ABC12345") and reference codes ("INV-1001") that pass the
+        uppercase check but aren't section headings.
+        """
         if not (4 <= len(line) <= 40):
             return False
         words = line.split()
@@ -115,6 +126,9 @@ class _HeadingStack:
         if not all(w.isupper() and sum(c.isalpha() for c in w) >= 2 for w in words):
             return False
         if line[-1] in ".:":
+            return False
+        alpha_count = sum(c.isalpha() for c in line)
+        if alpha_count < 4 or alpha_count / len(line) < 0.7:
             return False
         return True
 

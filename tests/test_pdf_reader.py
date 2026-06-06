@@ -65,6 +65,39 @@ class TestHeadingStack:
         s.update_from_line("NOTE.")
         assert s.path == []
 
+    def test_all_caps_rejects_alphanumeric_id(self) -> None:
+        """Customer IDs, invoice numbers, reference codes — uppercase but
+        mostly digits — must not be treated as section headings."""
+        s = _HeadingStack()
+        s.update_from_line("ABC12345")
+        s.update_from_line("INV-1001")
+        s.update_from_line("REF99")
+        assert s.path == []
+
+    def test_all_caps_accepts_real_short_heading(self) -> None:
+        """Sanity: the alphanumeric guard didn't break the easy case."""
+        s = _HeadingStack()
+        s.update_from_line("INVOICE")
+        assert s.path == ["INVOICE"]
+
+    def test_numbered_rejects_address_line(self) -> None:
+        """'89 Pacific Ave' and '100 Pine Street' fit the numbered-heading
+        regex but the top-level number is too large to plausibly be a
+        section number — they're addresses."""
+        s = _HeadingStack()
+        s.update_from_line("89 Pacific Ave")
+        s.update_from_line("100 Pine Street")
+        assert s.path == []
+
+    def test_numbered_accepts_reasonable_section_numbers(self) -> None:
+        """Top-level numbers ≤ 20 are accepted as plausible section numbers."""
+        s = _HeadingStack()
+        s.update_from_line("20 Final Provisions")
+        assert s.path == ["20 Final Provisions"]
+        s.update_from_line("21 Should Be Rejected")
+        # Stack still has the previous valid heading
+        assert s.path == ["20 Final Provisions"]
+
     def test_lowercase_paragraph_is_not_heading(self) -> None:
         s = _HeadingStack()
         s.update_from_line("The following tiers apply per the contract:")
