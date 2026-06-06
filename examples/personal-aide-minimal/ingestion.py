@@ -40,7 +40,7 @@ from agno_plus.core.structured import (
 )
 
 import jobs
-from bootstrap import DOMAIN_ID, USER_ID, engine, pipeline
+from bootstrap import DOMAIN_ID, USER_ID, engine, pipeline, storage
 from config import settings
 
 # Stored column annotations: table_name → annotation dict (mirrors agentic-aide
@@ -71,6 +71,26 @@ def _mirror_status(jid: str, pipeline_job_id: str) -> Any:
         jobs.set_step(jid, step)
     jobs.finish(jid, error=status.error if status.state == JobState.FAILED else None)
     return status
+
+
+def _drop_orphan_file(file_id: str) -> None:
+    """Delete an aide_files row + its raw bytes after a failed structured
+    ingest, so the file doesn't appear in the Structured tab with
+    tables_created=[]."""
+    try:
+        with engine().begin() as conn:
+            row = conn.execute(
+                text("SELECT storage_key FROM aide_files WHERE id=:id"),
+                {"id": file_id},
+            ).first()
+            conn.execute(text("DELETE FROM aide_files WHERE id=:id"), {"id": file_id})
+        if row and row.storage_key:
+            try:
+                storage().delete(row.storage_key)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _record_file(file_id: str, chunks: int, preview: dict, tables: list[str] | None = None) -> None:
@@ -183,11 +203,18 @@ def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> Non
         reader = SpreadsheetReader()
         tables = reader.extract_tables(content, filename)
     except Exception as exc:
+        _drop_orphan_file(file_id)
         jobs.finish(jid, error=f"read failed: {exc}")
         return
 
     if not tables or not tables[0]["headers"]:
-        jobs.finish(jid)
+        _drop_orphan_file(file_id)
+        jobs.finish(jid, error=(
+            "No tabular structure detected in this file. It looks like a "
+            "styled template, form, or free-form note rather than a clean "
+            "table. Re-upload using semantic ingestion to embed the content "
+            "for RAG instead."
+        ))
         return
 
     headers = tables[0]["headers"]

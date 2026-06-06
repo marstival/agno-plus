@@ -17,7 +17,9 @@ like the API map.
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,16 @@ from sqlalchemy import text
 from starlette.requests import Request
 
 from agno_plus.adapters.llm import call_llm
-from agno_plus.core.structured import drop_table, fetch_sample_rows
+from agno_plus.core.readers.spreadsheet import SpreadsheetReader
+from agno_plus.core.structured import (
+    ALLOWED_PG_TYPES,
+    bulk_insert,
+    create_dynamic_table,
+    drop_table,
+    fetch_sample_rows,
+    infer_column_types,
+    safe_col_name,
+)
 
 import bootstrap
 import chat
@@ -73,17 +84,40 @@ def health() -> dict[str, str]:
 
 _SPREADSHEET_EXTS = {".csv", ".tsv", ".xlsx", ".xls"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_VALID_MODES = {"structured", "semantic"}
 
 
 def _classify(filename: str, ingest_mode: str) -> str:
+    """Route to one of: 'structured' | 'document' | 'image'.
+
+    The caller MUST pick `structured` or `semantic` explicitly — there is no
+    extension-based auto routing. Images are the one exception: they always
+    go through the image OCR path regardless of mode, because semantic vs
+    structured doesn't apply.
+    """
     ext = Path(filename).suffix.lower()
     if ext in _IMAGE_EXTS:
         return "image"
-    if ingest_mode == "structured" and ext in _SPREADSHEET_EXTS:
+    if ingest_mode not in _VALID_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"ingest_mode must be one of {sorted(_VALID_MODES)} "
+                f"(got {ingest_mode!r}). Images are auto-routed; everything "
+                "else requires an explicit choice."
+            ),
+        )
+    if ingest_mode == "structured":
+        if ext not in _SPREADSHEET_EXTS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"structured mode only supports {sorted(_SPREADSHEET_EXTS)}. "
+                    "Re-upload as semantic to embed the content for RAG."
+                ),
+            )
         return "structured"
-    if ingest_mode == "semantic":
-        return "document"
-    return "structured" if ext in _SPREADSHEET_EXTS else "document"
+    return "document"
 
 
 def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type: str) -> None:
@@ -101,7 +135,7 @@ def _run_ingest(jid: str, file_id: str, content: bytes, filename: str, src_type:
 @app.post("/ingest")
 async def ingest(
     file: UploadFile = File(...),
-    ingest_mode: str = Form("auto"),  # "auto" | "structured" | "semantic"
+    ingest_mode: str = Form(...),  # "structured" | "semantic" — must be explicit
 ) -> dict[str, str]:
     content = await file.read()
     filename = file.filename or "upload"
@@ -133,12 +167,209 @@ def job_status(job_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Two-step structured ingest: preview (read + infer) → commit (write)
+#
+# /ingest/preview/structured parses the file in memory, returns the inferred
+# table name + column types + LLM-suggested descriptions for the user to
+# review/edit. /ingest/commit/structured takes the edited annotation and
+# does the actual SQL create + insert + aide_files row.
+#
+# Preview state lives in an in-process dict with a 30-minute TTL. A real
+# app would use Redis or DB-backed preview rows (see G-0002).
+# ---------------------------------------------------------------------------
+
+_PREVIEW_TTL_SECONDS = 30 * 60
+_previews: dict[str, dict[str, Any]] = {}
+
+
+def _gc_previews() -> None:
+    now = time.time()
+    expired = [pid for pid, pv in _previews.items() if now - pv["created_at"] > _PREVIEW_TTL_SECONDS]
+    for pid in expired:
+        _previews.pop(pid, None)
+
+
+def _suggest_column_descriptions(
+    table_name: str, headers: list[str], rows: list[dict[str, str]]
+) -> dict[str, str]:
+    """Best-effort LLM call to pre-fill column descriptions. Empty dict on failure."""
+    sample = rows[:3]
+    sample_text = "\n".join(str(r) for r in sample)
+    try:
+        raw = call_llm(
+            f"Database table '{table_name}' columns: {', '.join(headers)}\n"
+            f"Sample rows:\n{sample_text}\n\n"
+            "Write a short description (max 15 words) for each column. "
+            'Reply only with JSON: {"col_name": "description", ...}',
+            backend=settings.llm_backend,
+            model=settings.llm_model,
+            api_key=settings.openai_api_key,
+            base_url=settings.ollama_url,
+            json_response=True,
+        )
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+@app.post("/ingest/preview/structured")
+async def preview_structured(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Parse a spreadsheet, infer the schema, return a preview for the user
+    to edit before committing. The file bytes stay in memory until commit."""
+    _gc_previews()
+    content = await file.read()
+    filename = file.filename or "upload"
+    ext = Path(filename).suffix.lower()
+    if ext not in _SPREADSHEET_EXTS:
+        raise HTTPException(400, f"preview only supports {sorted(_SPREADSHEET_EXTS)}")
+
+    reader = SpreadsheetReader()
+    try:
+        tables = reader.extract_tables(content, filename)
+    except Exception as exc:
+        raise HTTPException(400, f"could not parse file: {exc}")
+    if not tables or not tables[0]["headers"]:
+        raise HTTPException(
+            422,
+            "No tabular structure detected. The file looks like a styled "
+            "template or free-form note rather than a clean table. Upload "
+            "this file under the Semantic tab to embed it for RAG instead.",
+        )
+
+    headers = tables[0]["headers"]
+    rows = tables[0]["rows"]
+    safe_name = safe_col_name(Path(filename).stem)[:32]
+    table_name = f"sd_{DOMAIN_ID[:8]}_{safe_name}"
+    col_types = infer_column_types(headers, rows)
+    suggestions = _suggest_column_descriptions(table_name, headers, rows)
+
+    preview_id = f"pre_{uuid.uuid4().hex[:10]}"
+    _previews[preview_id] = {
+        "created_at": time.time(),
+        "filename": filename,
+        "content": content,
+        "table_name": table_name,
+        "headers": headers,
+        "rows": rows,
+        "col_types": col_types,
+    }
+
+    return {
+        "preview_id": preview_id,
+        "filename": filename,
+        "table_name": table_name,
+        "row_count": len(rows),
+        "sample_rows": rows[:5],
+        "description": "",  # user fills in
+        "columns": [
+            {
+                "name": h,                                  # original header (for display)
+                "safe_name": safe_col_name(h),              # what the SQL column will be
+                "type": col_types.get(safe_col_name(h), "TEXT"),
+                "description": suggestions.get(h, ""),       # LLM-suggested, user-editable
+                "allowed_types": sorted(ALLOWED_PG_TYPES),
+            }
+            for h in headers
+        ],
+    }
+
+
+class CommitStructuredRequest(BaseModel):
+    preview_id: str
+    description: str = ""
+    columns: list[dict[str, Any]] = []  # [{name, type, description}, ...]
+
+
+@app.post("/ingest/commit/structured")
+async def commit_structured(body: CommitStructuredRequest) -> dict[str, Any]:
+    pv = _previews.pop(body.preview_id, None)
+    if not pv:
+        raise HTTPException(404, "Preview expired or not found — re-upload the file")
+
+    filename = pv["filename"]
+    headers = pv["headers"]
+    rows = pv["rows"]
+    table_name = pv["table_name"]
+    inferred_types = pv["col_types"]
+
+    # User-edited types override inferred; only ALLOWED_PG_TYPES are honored.
+    type_by_original: dict[str, str | None] = {c.get("name"): c.get("type") for c in body.columns}
+    final_types: dict[str, str] = {}
+    for h in headers:
+        safe = safe_col_name(h)
+        chosen = (type_by_original.get(h) or "").upper()
+        final_types[safe] = chosen if chosen in ALLOWED_PG_TYPES else inferred_types.get(safe, "TEXT")
+
+    # Persist raw file + aide_files row
+    file_id = f"f_{uuid.uuid4().hex[:10]}"
+    storage_key = storage().save(USER_ID, file_id, filename, pv["content"])
+    try:
+        create_dynamic_table(engine(), table_name, headers, final_types)
+        bulk_insert(engine(), table_name, headers, rows)
+    except Exception as exc:
+        storage().delete(storage_key)
+        raise HTTPException(500, f"SQL ingest failed: {exc}")
+
+    # Apply user-supplied annotation
+    desc_by_original = {c.get("name"): c.get("description", "") for c in body.columns}
+    ingestion.annotations[table_name] = {
+        "description": body.description,
+        "columns": [
+            {
+                "name": safe_col_name(h),
+                "type": final_types[safe_col_name(h)],
+                "description": desc_by_original.get(h, ""),
+            }
+            for h in headers
+        ],
+    }
+
+    preview = {
+        "source_type": "structured",
+        "filename": filename,
+        "table_name": table_name,
+        "description": body.description,
+        "columns": {
+            h: {
+                "type": final_types[safe_col_name(h)],
+                "description": desc_by_original.get(h, ""),
+            }
+            for h in headers
+        },
+        "row_count": len(rows),
+        "sample_rows": rows[:5],
+    }
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO aide_files (id, filename, source_type, chunks_count, "
+                "storage_key, tables_created, extraction_preview) "
+                "VALUES (:id, :fn, 'structured', 0, :sk, :tc, cast(:p as jsonb))"
+            ),
+            {"id": file_id, "fn": filename, "sk": storage_key,
+             "tc": [table_name], "p": json.dumps(preview)},
+        )
+
+    return {"file_id": file_id, "table_name": table_name}
+
+
+@app.delete("/ingest/preview/{preview_id}")
+def cancel_preview(preview_id: str) -> dict[str, str]:
+    _previews.pop(preview_id, None)
+    return {"status": "cancelled"}
+
+
+# ---------------------------------------------------------------------------
 # Files registry
 # ---------------------------------------------------------------------------
 
 
 @app.get("/files")
-def list_files() -> dict[str, Any]:
+def list_files(source_type: str = "") -> dict[str, Any]:
+    """List ingested files. `source_type` is an optional comma-separated
+    filter (e.g. `document,image` for the semantic tab, `structured` for
+    the structured tab)."""
+    wanted = {s for s in source_type.split(",") if s.strip()}
     with engine().connect() as conn:
         rows = conn.execute(
             text("SELECT id, filename, source_type, chunks_count, tables_created, "
@@ -157,6 +388,7 @@ def list_files() -> dict[str, Any]:
                 "has_raw": True,
             }
             for r in rows
+            if not wanted or r.source_type in wanted
         ]
     }
 
