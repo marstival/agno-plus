@@ -207,7 +207,12 @@ class KnowledgeStore:
     ) -> int:
         """Bulk-insert a list of reader document objects (each has .content and .metadata).
 
-        Designed for dual-write: pass the output of PdfReader.read() directly.
+        Useful when a reader emits multiple Documents per file (e.g.
+        IntelligentPdfReader emits one Document per block). Pass the output of
+        `reader.read()` directly. Whether to additionally embed a structured
+        file's flattened text (the "dual-write" pattern) is a consumer
+        decision — see guidance G-0005.
+
         Returns total chunks stored across all documents.
         """
         total = 0

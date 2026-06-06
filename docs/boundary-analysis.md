@@ -117,17 +117,21 @@ components (a Knowledge tab, a Chat tab) are application code.
 Some pieces could plausibly live in either place. The decisions below are
 deliberate.
 
-### 4.1 `KnowledgeAwarePipeline` — application-side subclass
+### 4.1 `KnowledgeAwarePipeline` and structured-vs-semantic ingestion shape
 
 `agno-plus` ships `IngestionPipeline` (synchronous, in-memory). agentic-aide
 subclasses it as `KnowledgeAwarePipeline` to delegate CHUNK/EMBED/UPSERT to
 `KnowledgeStore.insert_document()` (agentic-aide ADR-0007). The subclass
 lives in the application even though it is short and reusable.
 
-Reason: the choice to dual-write to a domain-scoped semantic store is a
-product decision, not a library one. Apps that don't use `KnowledgeStore`
-(e.g. apps using a different vector backend, or apps that don't dual-write)
-would not benefit from this subclass.
+The related question — "should ingesting a CSV write to both SQL *and* the
+semantic store?" — is also a product decision (see guidance G-0005). Both
+agentic-aide (which dual-writes) and `personal-aide-minimal` (which does
+not) build on the same `agno-plus` primitives without forcing the choice
+into the library. Apps that don't use `KnowledgeStore` (e.g. apps using a
+different vector backend) or apps that route tabular and prose data
+through completely separate ingest paths can compose the same primitives
+differently.
 
 ### 4.2 `TemporalGrounderDb` vs `EpisodicMemoryGrounder` — both in agno-plus
 

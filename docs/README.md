@@ -34,6 +34,7 @@ Recommended patterns for applications **built on** `agno-plus`. These are not li
 | G-0002 | [Async ingest with 202 + poll](guidance/G-0002-async-ingest-202-and-poll.md) |
 | G-0003 | [Harden SQL access when exposing structured tables](guidance/G-0003-sql-hardening-when-exposing-structured-tables.md) |
 | G-0004 | [Grounding mode per source — set at bootstrap](guidance/G-0004-grounding-mode-per-source-policy.md) |
+| G-0005 | [Structured ingestion → SQL; semantic ingestion → vectors; no implicit dual-write](guidance/G-0005-structured-vs-semantic-no-implicit-dual-write.md) |
 
 ## Other documents
 

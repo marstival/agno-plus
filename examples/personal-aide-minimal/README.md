@@ -9,8 +9,8 @@ local Postgres + pgvector.
 
 | agno-plus capability                                  | Module exercising it    | ADR  |
 |-------------------------------------------------------|-------------------------|------|
-| `IngestionPipeline` (read → ground → chunk → embed → upsert) | `ingestion.py`          | 0007 |
-| `SpreadsheetReader` (layout-aware Excel/CSV)          | `ingestion.run_structured` / pipeline registry | 0006 |
+| `IngestionPipeline` (read → ground → chunk → embed → upsert) | `ingestion.run_semantic` / `run_image`  | 0007 |
+| `SpreadsheetReader.extract_tables()` (CSV/XLSX → rows) | `ingestion.run_structured`             | 0006 |
 | `IntelligentPdfReader`                                | pipeline registry       | 0007 |
 | `ImageReader` (vision-LLM OCR)                        | `ingestion.run_image`   | 0003 (exception), 0007 |
 | `TextReader`                                          | pipeline registry       | 0007 |

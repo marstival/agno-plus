@@ -3,15 +3,21 @@
 Three paths, all built on agno-plus primitives:
 
   run_semantic(...)   PDF, text, markdown, image       → IngestionPipeline
+                                                         (vectors only)
   run_structured(...) CSV, XLSX                        → core.structured DDL
-                                                         + IngestionPipeline
-                                                           dual-write for RAG
+                                                         (SQL tables only)
   run_image(...)      images                           → IngestionPipeline
                                                          + LLM entity extraction
 
+Structured ingestion does NOT dual-write to the semantic store. The agent
+queries structured data via SQLTools; document chunks are reserved for
+genuinely unstructured content. See guidance G-0005 for the trade-off.
+
 Job state is mirrored from the pipeline's JobStatus into the in-memory
 tracker (see jobs.py) so the UI step bar renders the same READ → GROUND →
-CHUNK → EMBED → UPSERT progression for every ingest type.
+CHUNK → EMBED → UPSERT progression for ingest types that use the pipeline.
+The structured path uses a shorter READ → UPSERT sequence because there is
+no chunking/embedding step.
 """
 
 from __future__ import annotations
@@ -155,17 +161,22 @@ def run_image(jid: str, file_id: str, content: bytes, filename: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Structured ingestion (CSV/XLSX → SQL + RAG dual-write)
+# Structured ingestion (CSV/XLSX → SQL tables only)
 # ---------------------------------------------------------------------------
 
 
 def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> None:
-    """CSV/XLSX → dynamic PG table + dual-write to KnowledgeStore.
+    """CSV/XLSX → dynamic PG table only (no semantic embedding).
 
-    Step model (mirrors pipeline naming for UX consistency):
+    The agent reaches this data via SQLTools. Embedding a flattened text
+    representation alongside SQL was the previous "dual-write" behavior;
+    it was removed because (a) the chunk leaked values into the agent's
+    context as a silent retrieval and (b) the chunk drifts from the table
+    on re-upload. See guidance G-0005.
+
+    Step model:
         read   — SpreadsheetReader.extract_tables() returns headers + rows
         upsert — create_dynamic_table + bulk_insert
-        embed  — pipeline.submit() embeds a text representation
     """
     jobs.set_step(jid, JobStep.READ)
     try:
@@ -195,9 +206,6 @@ def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> Non
 
     _infer_annotations(table_name, col_types)
 
-    jobs.set_step(jid, JobStep.EMBED)
-    chunks = _dual_write_csv(file_id, filename, headers, rows)
-
     preview = {
         "source_type": "structured",
         "filename": filename,
@@ -206,25 +214,8 @@ def run_structured(jid: str, file_id: str, content: bytes, filename: str) -> Non
         "row_count": len(rows),
         "sample_rows": rows[:5],
     }
-    _record_file(file_id, chunks, preview, tables=[table_name])
+    _record_file(file_id, chunks=0, preview=preview, tables=[table_name])
     jobs.finish(jid)
-
-
-def _dual_write_csv(file_id: str, filename: str, headers: list[str], rows: list[dict]) -> int:
-    """Send a flattened text representation of the table through the pipeline
-    so KnowledgeStore can answer natural-language questions over the data."""
-    text_repr = "\n".join(
-        ", ".join(f"{safe_col_name(h)}: {row.get(h, '')}" for h in headers)
-        for row in rows[:200]
-    )
-    bytes_repr = text_repr.encode()
-    pseudo_name = f"{Path(filename).stem}.txt"
-    try:
-        pid = pipeline().submit(bytes_repr, pseudo_name, _meta(file_id))
-    except ValueError as exc:
-        print(f"[warn] structured dual-write failed: {exc}")
-        return 0
-    return pipeline().status(pid).chunks_count
 
 
 def _infer_annotations(table_name: str, col_types: dict[str, str]) -> None:
