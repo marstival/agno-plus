@@ -77,20 +77,62 @@ def _build_pipeline(store: KnowledgeStore, grounder: TemporalGrounder) -> Ingest
 
 def _build_agent(store: KnowledgeStore, grounder: TemporalGrounder) -> Any:
     """Agno Agent wired with:
-      - DomainKnowledge       → search_knowledge tool, user_id closure at run time (ADR-0009)
+      - DomainKnowledge       → build_context text in the system prompt (ADR-0009)
+      - explicit search_knowledge tool registered in `tools=[...]` — gives the
+        agent an auditable, agency-driven retrieval call (no silent auto path)
       - SQLTools + custom     → run_sql_query over the user's structured tables,
                                 with annotation-aware list/describe (ADR-0016)
       - TemporalGrounderDb    → episodic memory grounded automatically (ADR-0005)
       - native session history (Agno's add_history_to_context)
     """
+    import json
+
     from agno.agent import Agent
     from agno.db.postgres.postgres import PostgresDb
+    from agno.tools import tool
     from agno.tools.sql import SQLTools
 
     from agno_plus.adapters.agno import DomainKnowledge
 
     # Imported here so sql.py can import bootstrap.engine without a cycle.
     from sql import describe_table, list_my_sql_tables
+
+    @tool
+    def search_knowledge(query: str, domain_id: str = "") -> str:
+        """Search the user's ingested documents (PDFs, text, markdown, image OCR)
+        for content relevant to the question.
+
+        Always call this for any question that might be answered from the user's
+        documents — facts, definitions, descriptions, named entities, explanations,
+        or relationships. Call it before considering the SQL flow.
+
+        Args:
+            query: Search query text. Use a focused paraphrase of the user's
+                question for better matches.
+            domain_id: Optional domain filter. Pass empty string to search
+                across all of the user's documents (recommended default).
+
+        Returns:
+            JSON {"chunks": [{id, excerpt, filename, block_type, page_number,
+            table_label, score}, ...]}. Empty chunks list means nothing relevant
+            was found — try a different query before falling back to SQL.
+        """
+        results = store.search(query, user_id=USER_ID, domain_id=domain_id, top_k=5)
+        if not results:
+            return json.dumps({"chunks": []})
+        chunks = [
+            {
+                "id": r.id,
+                "excerpt": r.content[:400],
+                "filename": r.metadata.get("filename", ""),
+                "block_type": r.metadata.get("block_type", ""),
+                "page_number": r.metadata.get("page_number", ""),
+                "table_label": r.metadata.get("table_label", ""),
+                "score": r.metadata.get("score", 0.0),
+            }
+            for r in results
+        ]
+        return json.dumps({"chunks": chunks})
 
     base_db = PostgresDb(db_url=settings.database_url)
     grounded_db = TemporalGrounderDb(db=base_db, grounder=grounder)
@@ -103,12 +145,22 @@ def _build_agent(store: KnowledgeStore, grounder: TemporalGrounder) -> Any:
         enable_agentic_memory=True,
         add_history_to_context=True,
         num_history_runs=5,
-        search_knowledge=True,
-        # Single-user demo: scope every auto-retrieval to this user/domain.
-        # In a multi-tenant app, replace with run_context-driven filters
-        # (see ADR-0009 and agentic-aide ADR-0009).
+        # Auto knowledge retrieval is OFF — search_knowledge is exposed as an
+        # explicit tool the agent must call. This makes the retrieval visible
+        # in the trace, gives the agent agency to refine its query, and
+        # prevents fixation on SQL by surfacing document chunks as a tool
+        # result rather than silent system-prompt context.
+        search_knowledge=False,
+        # Defence in depth: if any future Agno change re-enables an auto path,
+        # scope it to this user/domain. The live user_id binding is via the
+        # DomainKnowledge.get_tools closure (ADR-0009).
         knowledge_filters={"user_id": USER_ID, "domain_id": DOMAIN_ID},
         tools=[
+            # Explicit semantic retrieval. Registered here (rather than via
+            # search_knowledge=True on the Agent) so the call shows up as a
+            # tool invocation in the trace and the agent has explicit agency
+            # over what it searches for.
+            search_knowledge,
             # Agno's built-in run_sql_query against a separate engine with a
             # 5-second statement timeout. Built-in list_tables / describe_table
             # are disabled so the agent has to go through our annotation-aware
@@ -122,17 +174,36 @@ def _build_agent(store: KnowledgeStore, grounder: TemporalGrounder) -> Any:
             describe_table,
         ],
         instructions=[
-            "You are a helpful personal aide with access to the user's uploaded "
-            "documents and structured tables.",
-            "Use search_knowledge to retrieve relevant document chunks before answering. "
-            f"Pass an empty string as domain_id to search all of '{DOMAIN_ID}'.",
-            "For questions that look numeric, tabular, or quantitative (totals, counts, "
-            "filters, comparisons across rows), use the SQL flow: "
-            "(1) call list_my_sql_tables, (2) call describe_table on the relevant one, "
-            "(3) call run_sql_query with the table name from step 1. Never invent table "
-            "or column names — always derive them from list_my_sql_tables and describe_table.",
-            "It is fine to combine search_knowledge and run_sql_query in the same turn "
-            "when a question spans documents and tables.",
+            "You are a helpful personal aide with two complementary stores of "
+            "knowledge: (a) uploaded documents reached via the `search_knowledge` "
+            "tool (semantic search over PDFs, text, markdown, image OCR) and "
+            "(b) structured tables reached via `list_my_sql_tables`, "
+            "`describe_table`, and `run_sql_query` (Postgres).",
+            "",
+            "WORKFLOW for every user question — follow these steps in order:",
+            "1. ALWAYS call `search_knowledge` first with the user's question (or "
+            f"a focused paraphrase). Use domain_id='' to search all of '{DOMAIN_ID}'. "
+            "Read the returned chunks carefully — most non-trivial answers are at "
+            "least partly there.",
+            "2. If the question asks for aggregations (sum, count, average, min/max), "
+            "exact-row lookups by attribute, or comparisons across rows, ALSO run "
+            "the SQL flow: `list_my_sql_tables` → `describe_table` → "
+            "`run_sql_query`. Derive table and column names only from those tool "
+            "results — never invent them.",
+            "3. Synthesize the answer using BOTH sources when both contributed. "
+            "Briefly state the source: '(from your documents)' or '(from your "
+            "<table> table)'.",
+            "",
+            "Anti-patterns to avoid:",
+            "- Do not call `run_sql_query` before calling `search_knowledge`. The "
+            "document chunks may explain what columns mean or contain the answer "
+            "outright.",
+            "- Do not retry the same SQL query with minor variations when it "
+            "returned NULL or empty rows. Fall back to `search_knowledge` with a "
+            "refined query instead.",
+            "- Do not reply 'I don't have access to that' before actually calling "
+            "`search_knowledge` and (if applicable) the SQL flow.",
+            "",
             "When the user asks about dates, prefer the grounded event_at metadata "
             "over raw text — relative dates are already normalized.",
         ],
