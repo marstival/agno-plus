@@ -61,6 +61,66 @@ class _PdfBlock:
     raw_cells: list[list[str]] | None = None      # TABLE blocks only
     raw_text: str | None = None                   # TEXT / NOTE blocks only
     external_headers: list[str] | None = None     # headers found above the table
+    headings: list[str] = field(default_factory=list)  # heading stack at block emission
+
+
+# ---------------------------------------------------------------------------
+# Heading detection — maintains a section stack as the reader walks blocks
+# ---------------------------------------------------------------------------
+
+
+_NUMBERED_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+([A-Z]\S.*?)\s*$")
+_ROMAN_HEADING_RE = re.compile(r"^([IVX]+)\.\s+([A-Z]\S.*?)\s*$")
+
+
+class _HeadingStack:
+    """Depth-aware heading stack updated as the reader walks PDF blocks.
+
+    Numbered headings ("3.1 Foo") slot in by dot depth. Plain uppercase single
+    lines ("INVOICE", "PAYMENT TERMS") replace the stack at depth 1.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[tuple[int, str]] = []  # (depth, text)
+
+    def update_from_line(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        m = _NUMBERED_HEADING_RE.match(line)
+        if m:
+            depth = m.group(1).count(".") + 1
+            self._push(depth, line)
+            return
+        if _ROMAN_HEADING_RE.match(line):
+            self._push(1, line)
+            return
+        if self._is_all_caps_heading(line):
+            self._push(1, line)
+
+    def _push(self, depth: int, text: str) -> None:
+        while self._stack and self._stack[-1][0] >= depth:
+            self._stack.pop()
+        self._stack.append((depth, text))
+
+    @staticmethod
+    def _is_all_caps_heading(line: str) -> bool:
+        """Conservative all-caps rule: short standalone line, no terminal punctuation,
+        every word ≥ 2 alphabetic chars (rejects column-header rows like 'Q T Y')."""
+        if not (4 <= len(line) <= 40):
+            return False
+        words = line.split()
+        if not (1 <= len(words) <= 4):
+            return False
+        if not all(w.isupper() and sum(c.isalpha() for c in w) >= 2 for w in words):
+            return False
+        if line[-1] in ".:":
+            return False
+        return True
+
+    @property
+    def path(self) -> list[str]:
+        return [text for _, text in self._stack]
 
 
 class IntelligentPdfReader:
@@ -115,10 +175,18 @@ class IntelligentPdfReader:
             )
 
         blocks: list[_PdfBlock] = []
+        stack = _HeadingStack()
         try:
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for page_num, page in enumerate(pdf.pages, start=1):
-                    blocks.extend(self._parse_page(page, page_num))
+                    for blk in self._parse_page(page, page_num):
+                        # Text blocks can introduce headings; tables inherit
+                        # the stack state from preceding text on the same page.
+                        if blk.raw_text:
+                            for line in blk.raw_text.splitlines():
+                                stack.update_from_line(line)
+                        blk.headings = list(stack.path)
+                        blocks.append(blk)
         except Exception as exc:
             logger.warning("pdfplumber failed to open PDF: %s", exc)
         return blocks
@@ -476,16 +544,29 @@ class IntelligentPdfReader:
             )
             if not content:
                 continue
+
+            metadata: dict[str, Any] = {
+                "filename": filename,
+                "block_type": block.block_type.value,
+                "page_number": block.page_number,
+                "headings": list(block.headings),
+            }
+
+            # Structured table fields — consumed by chunk_table_block (Step C)
+            # to emit one summary chunk + N row chunks with column context.
+            if block.block_type == _BlockType.TABLE and block.raw_cells:
+                table = self._cells_to_table_dict(block.raw_cells, block.external_headers)
+                if table:
+                    metadata["table_columns"] = list(table["headers"])
+                    metadata["table_rows"] = list(table["rows"])
+                    metadata["table_label"] = block.headings[-1] if block.headings else None
+
             docs.append(Document(
                 id=f"pdf_{uuid.uuid4().hex[:8]}",
                 content=content,
                 source_type="pdf",
                 source_name=filename,
-                metadata={
-                    "filename": filename,
-                    "block_type": block.block_type.value,
-                    "page_number": block.page_number,
-                },
+                metadata=metadata,
             ))
         return docs
 
