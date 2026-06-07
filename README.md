@@ -2,6 +2,11 @@
 
 Reusable extension layer for [Agno](https://github.com/agno-agi/agno) with enhanced ingestion, episodic memory, and UI capabilities.
 
+## Example demo
+
+agno-plus/examples/personal-aide-minimal/README.md
+
+
 ## Capabilities
 
 - **SpreadsheetReader** — layout-aware Excel/CSV ingestion with merged cell expansion and block detection (TABLE / KV_PAIR / NOTE)
@@ -57,7 +62,7 @@ ui/
 | 3 | `core/readers/spreadsheet.py` — 3-layer pipeline | ✅ done |
 | 4 | `core/pipeline/` — IngestionWorker protocol, job state machine, chunking | ✅ done |
 | 5 | `adapters/agno/` — thin wrappers for readers + memory store | ✅ done |
-| 6 | `examples/personal-aide-minimal/` — end-to-end validation | ⏳ not started |
+| 6 | `examples/personal-aide-minimal/` — minimal example showcase | ✅ done |
 | 7 | `core/readers/audio.py` and `core/readers/image.py` — STT and OCR | ✅ done |
 | 8 | `adapters/langchain/` — LangChain loader wrappers | ✅ done |
 | 9 | `ui/components/` — UploadWidget, JobStatusWidget, KnowledgeBrowser | ✅ done |
